@@ -5,10 +5,8 @@ one fresh VPS. Remote Ansible is intended for an existing controller workflow.
 
 ## Before installation
 
-Use a fresh Debian 12 or Ubuntu 24.04 amd64 VPS on a 1 GB or larger plan, with
-at least 900 MiB of RAM visible to the OS. Confirm `/dev/net/tun`, WireGuard,
-iptables/NAT, outbound network access, and a recovery console. Existing swap is
-diagnostic-only and is never changed.
+Check the [VPS requirements](../README.md#before-you-start) before choosing a path.
+Neither role modifies swap or zram.
 
 > [!WARNING]
 > Open the planned SSH and WireGuard ports in the provider firewall before
@@ -69,11 +67,10 @@ The installer verifies the SSH-signed tag, checks out its exact commit and shows
 the effective settings before applying server roles. Source-verification packages
 may already be installed when you cancel; secrets are removed from temporary files.
 
-On rerun, `/etc/vps-nook` contains the authoritative encrypted configuration.
-Rerun the same tagged installer to converge it; a later compatible release may
-upgrade it. Do not supply credentials again or mix controller-managed deployments
-with public-installer state. A malformed or interrupted vault is preserved for
-recovery, never silently replaced.
+Reruns reuse the authoritative encrypted inputs under `/etc/vps-nook`; see
+[automated inputs](configuration.md#automated-installer-inputs) and
+[upgrade compatibility](../UPGRADE.md). Do not mix controller deployments with
+installer state. Malformed vaults are preserved for recovery, never replaced.
 
 ## Remote Ansible deployment
 
@@ -131,15 +128,12 @@ ssh -p <ssh_port> -L 51821:127.0.0.1:51821 \
 ```
 
 Open `http://127.0.0.1:51821`, sign in, create a client, and import its profile.
-Connect the client before opening the internal sites. In `services` mode, the
-server enforces access only to the managed VPN and service destinations; editing
-the client profile cannot turn it into a full tunnel.
+Connect the client before opening the internal sites. The default
+[traffic policy](configuration.md#traffic-policy) reaches managed services only.
 
 The internal sites default to `https://wg.internal` and
-`https://adguard.internal`. Trust the Caddy root certificate fetched by remote
-Ansible under `fetched_certs/<inventory-host>/root.crt`. A public installation
-keeps the checkout's fetched copy under
-`/opt/vps-nook-installer/repo/fetched_certs/localhost/root.crt`.
+`https://adguard.internal`. [Trust your Caddy CA](#trust-the-internal-ca) before
+using them.
 
 AdGuard's bootstrap UI is available through a separate tunnel when needed:
 

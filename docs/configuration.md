@@ -32,24 +32,17 @@ vault under `/etc/vps-nook` and preserves them across reruns.
 
 ## Traffic policy
 
-```yaml
-wg_traffic_mode: services
-```
+Set `wg_traffic_mode` explicitly when changing policy:
 
-`services` is the default and is enforced on the server. Clients can reach only
-`wg_services_only_ipv4_destinations` and
-`wg_services_only_ipv6_destinations`; modifying AllowedIPs on a client does not
-bypass that policy.
+| Mode | Behavior |
+| --- | --- |
+| `services` (default) | Server-enforced IPv4/IPv6 access only to `wg_services_only_ipv4_destinations` and `wg_services_only_ipv6_destinations` |
+| `full` | Internet access through the VPS; requires IPv4 egress and adds IPv6 only after a successful host egress probe |
 
-```yaml
-wg_traffic_mode: full
-```
-
-`full` provides IPv4 internet egress through the VPS and requires working IPv4
-egress. IPv6 is added when the host proves IPv6 egress; otherwise generated
-profiles omit `::/0`, so client IPv6 remains outside the VPN. The mode is applied
-as a rollback-capable transaction. There is no `wg_enable_ipv6` input. Changing
-modes requires an explicit configuration change and updated client profiles.
+Editing client AllowedIPs cannot bypass services-mode policy. Without host IPv6
+egress, full-mode profiles omit `::/0`, leaving client IPv6 outside the VPN.
+Transitions are transactional and require updated client profiles. There is no
+`wg_enable_ipv6` input.
 
 ## Ports and identity
 
@@ -130,6 +123,6 @@ credentials or change routing.
 development fixtures only. Production accepts the built-in repository and release.
 `NO_COLOR` disables terminal colors. No progress control codes are emitted to logs.
 
-For operational scripts, `NOOK_PROJECT_ROOT` selects an explicit project root and
+For backup and restore, `NOOK_PROJECT_ROOT` selects an explicit project root and
 `NOOK_KEEP_BACKUPS` sets backup retention. These are not installer path overrides.
 All old `ZERO_TRUST_*` inputs are rejected, with values omitted from diagnostics.

@@ -1,6 +1,5 @@
 """Single registry of retained executable contracts; collection never executes commands."""
 import ast
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -42,7 +41,34 @@ VMS = (
          "--ssh-rollback-test", "--ssh-cutover-test", "--reboot-test", "--ufw-backend-failure-test"), 4200),
 )
 
-# Required native boundaries from the migration map. Real SSH remains in VMS.
+# Historical boundaries are independent of registration so deleting a script
+# together with its entry still fails validation.
+HISTORICAL_CONTRACTS = frozenset({
+    "ansible-runtime.sh",
+    "backup-sandbox.sh",
+    "installer-contract.sh",
+    "secret-installer-contract.sh",
+    "restore-sandbox.sh",
+    "compose-render.sh",
+    "traffic-mode-contract.sh",
+    "hardening-contract.sh",
+    "orchestration-core.sh",
+    "ufw-docker-idempotency.sh",
+    "workflow-contract.sh",
+    "check-tooling.sh",
+    "qemu-source-contract.sh",
+    "qemu-packet-contract.sh",
+    "sbom-contract.sh",
+    "fixture-git-signing-contract.sh",
+    "installer-ux.sh",
+    "ssh-recovery.sh",
+    "release-artifacts-contract.sh",
+    "release-workflow-contract.sh",
+    "release-publish-contract.sh",
+    "release-contract.sh",
+})
+
+# Required native boundaries. Real SSH remains in VMS.
 NATIVE = {
     "installer-ux.sh": ("tests/installer/test_ux.py", tuple("test_installer_" + name for name in (
         "defaults", "colors", "cancel", "edit_invalid_port", "ctrl_c", "eof", "password_length",
@@ -69,10 +95,7 @@ def validate_registry(root: Path, contracts=CONTRACTS, vms=VMS):
     for case in cases:
         if not (root / case.argv[1]).is_file():
             raise ValueError("registered script is missing: " + case.id)
-    # The reviewed migration map protects mandatory historical boundaries even
-    # if a script and its registry entry are accidentally removed together.
-    historical = set(re.findall(r"^\| `([a-z-]+\.sh)(?: --self-test)?`",
-                                (root / "docs/pytest-migration.md").read_text(), re.MULTILINE))
+    historical = HISTORICAL_CONTRACTS
     if historical - set(NATIVE) - {Path(path).name for path in registered}:
         raise ValueError("required historical contract is missing")
     for filename, (path, required) in NATIVE.items():

@@ -11,7 +11,7 @@ ssh -p <ssh_port> <admin_user>@<vps-address> \
   'sudo bash -s --' < scripts/synthetic-check.sh
 ```
 
-The scripts default to `/opt/vps-nook`; set `NOOK_PROJECT_ROOT`
+Backup and restore default to `/opt/vps-nook`; set `NOOK_PROJECT_ROOT`
 only for an intentional alternate deployment root. Backup and restore use the
 same `sudo bash -s -- [arguments] < scripts/<name>.sh` pattern when the checkout
 is on the controller.
@@ -55,10 +55,11 @@ sudo /opt/vps-nook-installer/repo/scripts/backup.sh \
 
 ## Restore
 
-Restore validates archive type, paths, members, permissions, Compose syntax,
-and Caddy configuration in a same-filesystem staging directory before
-activation. If activation or readiness fails, it restores and restarts the
-prior project.
+Restore validates archive structure and safe extraction into a same-filesystem
+staging directory. It stops the current stack, preserves its directory, and
+activates the staged tree. Compose validation, startup and container readiness
+checks follow activation; failures trigger restoration and restart of the prior
+project. Restore does not run a separate Caddy configuration validation.
 
 > [!WARNING]
 > A successful restore replaces the active project tree with backup contents.
@@ -116,17 +117,8 @@ failure.
 
 ## Removing the deployment
 
-There is no automated uninstall primitive. Removal is intentionally manual
-because the project changes SSH, UFW, Docker, users, and persistent service
-data.
-
-> [!WARNING]
-> The commands below permanently delete containers, volumes, VPN peers, DNS
-> state, certificates, and installer credentials. Make and verify an off-host
-> backup first. Restore a safe SSH and firewall configuration before removing
-> project-managed files.
-
-After those safeguards, stop the Compose project and remove only the confirmed
-project paths using the provider console or an authenticated administrator.
-Do not copy a generic recursive-delete command from documentation onto a live
-host.
+There is no automated uninstall. First verify an off-host backup and restore a
+safe SSH/firewall configuration with console access available. Then stop Compose
+and remove only confirmed project paths. Removing service volumes and installer
+state destroys VPN peers, DNS state, certificates and saved credentials; host
+users, Docker and firewall rules require separate review.

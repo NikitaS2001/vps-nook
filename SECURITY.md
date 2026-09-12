@@ -24,9 +24,5 @@ Reports are reviewed on a best-effort basis. There is no guaranteed response
 or remediation SLA. After validation, the maintainer will determine the
 appropriate fix, disclosure timing, and release notes.
 
-## Operational safety
-
-This project changes host firewall, SSH, Docker, and VPN configuration. Keep
-an existing recovery path available while applying changes, use Ansible Vault
-for secrets, and do not post inventories, vault contents, private keys, or
-production logs in an issue or pull request.
+See the [security model](docs/security.md) for deployment trust boundaries and
+operator responsibilities.

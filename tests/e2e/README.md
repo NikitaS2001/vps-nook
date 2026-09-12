@@ -1,8 +1,8 @@
 # End-to-end tests
 
 These tests use disposable QEMU/KVM guests. They prove repository-controlled
-host behavior; they do not prove a provider firewall, provider routing, or a
-real host lifecycle. GitHub Actions stores no VPS credentials.
+guest behavior, including lifecycle; they do not prove provider firewall or
+external routing. GitHub Actions stores no VPS credentials.
 
 Local prerequisites are `qemu-system-x86_64`, `qemu-img`, KVM,
 `genisoimage`, OpenSSH, curl, and the tools installed by
@@ -10,17 +10,22 @@ Local prerequisites are `qemu-system-x86_64`, `qemu-img`, KVM,
 
 ## Standard entry points
 
-```bash
-./scripts/check.sh --e2e
-./scripts/check.sh --release
-```
+After bootstrapping, activate `.venv` and select one suite:
 
-`--e2e` runs the repository installer in explicit development-source mode on
-the CI-selected Debian 12 or Ubuntu 24.04 image. It exercises default
-`services` behavior with a real in-guest client, reruns idempotently, and
-reboots. Production tag and attestation verification are separate release
-contracts. `--release` adds the lifecycle upgrade/restore drill and those
-release contracts.
+| Command | Scenarios |
+| --- | --- |
+| `pytest -m qemu` | Services installation with all six flags listed below |
+| `pytest -m remote` | Real SSH rollback/cutover, UFW failure and reboot |
+| `pytest -m lifecycle` | Baseline/current/rerun/encrypted restore |
+
+Each command runs one platform; Ubuntu 24.04 is the default. Use image and user
+overrides for Debian. Missing KVM/tools fail. Tests use private source snapshots
+and deployment files; pytest owns cleanup. Keep-state debugging is available
+only through direct Bash harnesses. For quick checks, gate ordering and private
+logs, see [Contributing](../../CONTRIBUTING.md).
+
+The examples below invoke Bash directly for targeted scenarios. Production
+signed-tag and attestation verification remain separate release contracts.
 
 ## Repository installer guest
 
@@ -69,8 +74,10 @@ tests/e2e/qemu-remote-install.sh \
 | `--ufw-backend-failure-test` | Firewall backend failure preserves recovery access |
 | `--reboot-test` | Remote deployment remains ready after reboot |
 
-This harness creates ignored controller inventory and encrypted vault fixtures,
-deploys over SSH, and removes the controller fixtures during cleanup.
+This harness creates inventory and encrypted vault fixtures in a private source
+copy, deploys over SSH, and cleans up that copy. Operator files stay untouched.
+Native `test_ssh_recovery_mocked_systemd` cases only render tasks with mocked
+systemd; they do not replace this VM test.
 
 ## Lifecycle and restore
 
@@ -116,7 +123,7 @@ root README. Never place live credentials in repository files, logs, or CI.
 
 Current pull-request CI runs the installer from the checked-out source in
 explicit development mode and `services` mode on Debian 12 and Ubuntu 24.04.
-Weekly automation runs every Monday at 02:17 UTC (Greenwich time) and supports manual dispatch
+The Weekly workflow is configured for every Monday at 02:17 UTC (Greenwich time) and supports manual dispatch
 for pre-release checks and diagnostics. It repeats that default-mode matrix to catch upstream image
 drift and adds the lifecycle upgrade/restore scenario on Ubuntu. Public-IPv6
 packet proof for `full` is a manual dual-stack scenario because generic
@@ -132,22 +139,6 @@ private evidence directory and scan them for credentials before sharing.
 The provider firewall remains the operator's responsibility. Keep console or
 rescue access during every real deployment.
 
-## Pytest entrypoints
-
-Activate `.venv`, then use `pytest -m qemu` for services installation, client,
-idempotency, reboot, bootstrap-timeout, stopped-container and invalid-Caddy
-scenarios. `pytest -m remote` runs SSH rollback/cutover/reboot and UFW backend
-failure in a disposable VM; native `test_ssh_recovery_mocked_systemd` cases
-only render recovery tasks with mocked systemd.
-
-`pytest -m lifecycle` runs baseline/current/rerun/encrypted restore with the
-existing harness, including its explicit pre-release reinstall/restore fallback.
-The terminal and JUnit record `lifecycle_baseline_kind`; `bootstrap-snapshot`
-is not proof of an upgrade from a released version. An explicitly requested
-missing `E2E_BASELINE_REF` remains an error. All image/user/port settings above
-remain applicable.
-Run each supported platform explicitly with its image and cloud user.
-Source snapshots and deployment files are private to each test. Pytest takes
-ownership of cleanup; keep-state debugging applies only to direct Bash runs.
-Missing KVM/tools fail the selected suite. Logs remain private locally; CI
-uploads only JUnit summaries. See [acceptance evidence](../../docs/pytest-validation.md).
+Record tested revisions and completed scenarios in the pull request; see
+[Releasing](../../docs/releasing.md) for outstanding acceptance gates. JUnit records `lifecycle_baseline_kind`; a
+`bootstrap-snapshot` result does not prove a released-version upgrade.

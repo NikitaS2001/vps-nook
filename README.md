@@ -34,8 +34,8 @@ inside the VPN. The default VPN mode reaches private services only; choose
 ## Install
 
 **v2.0.0 is in preparation. The command below is a preview, not a published
-installation endpoint.** Existing v1 installations require a separate migration;
-see [UPGRADE.md](UPGRADE.md). No existing data is moved or deleted automatically.
+installation endpoint.** v1 has no supported in-place upgrade: use a fresh VPS
+and read [UPGRADE.md](UPGRADE.md).
 
 <!-- ssot:quickstart:start -->
 ```text
@@ -54,14 +54,9 @@ That guide also covers sudo, installing curl, and remote Ansible deployment.
 
 ## Connect your first device
 
-1. Use the command printed by the installer to test a **new SSH login**.
-2. Open its SSH tunnel command on your computer and visit the wg-easy panel.
-3. Create a client, import its profile into WireGuard, and connect.
-4. Trust the server's Caddy root CA on your device, then open
-   `https://wg.internal` and `https://adguard.internal`.
-
-See [first-client instructions and CA setup](docs/getting-started.md#first-wireguard-client).
-The installer prints your actual ports, names and certificate location.
+Confirm a new SSH login, tunnel to wg-easy, import a WireGuard client profile,
+and trust your server's Caddy CA. Follow [the connection guide](docs/getting-started.md#first-wireguard-client);
+the installer prints your actual ports, names and certificate location.
 
 ## Keep it running
 

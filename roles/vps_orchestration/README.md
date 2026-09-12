@@ -36,13 +36,9 @@ mode `0600`; see [Configuration](../../docs/configuration.md).
 
 ## Traffic modes
 
-`services` is the default. IPv4 and IPv6 forwarding rules on the server restrict
-peers to explicit managed destinations, regardless of client-side AllowedIPs.
-
-`full` is an explicit mode transition. It requires working host IPv4 egress and
-adds IPv6 routing only when host IPv6 egress works. It snapshots the complete
-wg-easy state, applies the policy while wg-easy is stopped, and restores that
-snapshot if activation or readiness fails.
+See [traffic policy](../../docs/configuration.md#traffic-policy) for mode behavior
+and client requirements. Transitions snapshot wg-easy state, apply policy while
+it is stopped, and restore the snapshot if activation or readiness fails.
 
 ## Owned state and extension points
 

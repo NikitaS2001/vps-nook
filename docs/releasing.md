@@ -73,10 +73,10 @@ publish directly from the workflow UI.
 
 ## VPS Nook v2 publication checklist
 
-v2 is currently unreleased. The GitHub repository is now `NikitaS2001/vps-nook`.
-Finish local contracts and supported-platform E2E, including SSH negative cases.
-Keep historical tags/assets untouched. Confirm workflows, the repository URL and
-attestation identity under the new name before creating the signed v2.0.0 tag.
+v2 is currently unreleased. Review validation evidence in the pull request,
+finish supported-platform E2E including SSH negative cases, and keep historical
+tags/assets untouched. Confirm the `NikitaS2001/vps-nook` workflow and attestation
+identity before creating the signed v2.0.0 tag.
 
 Before release, manually dispatch the Weekly workflow. For migration acceptance,
 run it twice consecutively against the same commit, including both supported
