@@ -321,6 +321,8 @@ def test_stage_summary_does_not_forward_log(tmp_path):
     log = tmp_path / "log"
     log.write_text("[E2E] Booting the VM FAKE-SECRET\nTASK [fixture restore FAKE-SECRET]\n")
     assert safe_stage(log) == "Ansible deployment"
+    log.write_text("[PASS] case=activation-interrupt FAKE-SECRET\n[FAIL] restore drill failed FAKE-SECRET\n")
+    assert safe_stage(log) == "restore drill failed"
 
 
 def test_clean_vm_may_remove_pidfile(tmp_path):

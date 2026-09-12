@@ -184,6 +184,21 @@ def safe_stage(log):
               (b"[E2E] Reboot survival verified", "post-reboot checks"),
               (b"[E2E] Running idempotency", "idempotency"),
               (b"[E2E] Running restore", "restore"),
+              (b"[PASS] round-trip=", "restore archive round-trip"),
+              (b"[PASS] malicious=", "restore malicious archive rejection"),
+              (b"[PASS] case=preexisting-symlink", "restore symlink rejection"),
+              (b"[PASS] case=concurrent-", "restore concurrent-state recovery"),
+              (b"[PASS] case=activation-rollback", "restore activation rollback"),
+              (b"[PASS] case=readiness-timeout", "restore readiness timeout"),
+              (b"[PASS] case=rollback-start-failure", "restore restart failure"),
+              (b"[PASS] case=lock-contention", "restore lock contention"),
+              (b"[PASS] case=archive-symlink", "restore archive descriptor rejection"),
+              (b"[PASS] case=identity-symlink", "restore identity descriptor rejection"),
+              (b"[PASS] case=activation-interrupt", "restore activation interrupt"),
+              (b"[PASS] case=restore-drill", "restore drill completed"),
+              (b"[FAIL] restore drill failed", "restore drill failed"),
+              (b"[FAIL] activation interrupt did not restore prior root", "restore interrupt rollback failed"),
+              (b"[FAIL] activation interrupt did not restart prior stack", "restore interrupt restart failed"),
               (b"[CLEANUP]", "cleanup"))
     with log.open("rb") as stream:
         stream.seek(max(0, log.stat().st_size - 65536))
@@ -218,7 +233,7 @@ def run(argv, *, cwd, log, timeout=900, env=None, case_id="command", heartbeat=N
                     if heartbeat:
                         heartbeat(f"{case_id}: running ({int(time.monotonic() - started)}s); stage: {safe_stage(log)}")
             if code != expected:
-                raise CommandFailure(f"{case_id}: exit {code}; private log: {log}")
+                raise CommandFailure(f"{case_id}: exit {code}; stage: {safe_stage(log)}; private log: {log}")
             return code
     except OSError:
         raise CommandFailure(f"{case_id}: could not start required command; private log: {log}") from None
