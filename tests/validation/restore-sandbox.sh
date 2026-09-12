@@ -373,8 +373,10 @@ run_activation_interrupt() {
         >"${ACTIVE_SANDBOX}/stdout" 2>"${ACTIVE_SANDBOX}/stderr" &
     pid=$!
     for _ in {1..2000}; do
-        if [[ -f ${RESTORE_TEST_ROOT}/volumes/wg-easy/wg-easy.db \
-            && $(<"${RESTORE_TEST_ROOT}/volumes/wg-easy/wg-easy.db") == restored-db ]]; then
+        # The root is atomically renamed during activation. A file can disappear
+        # after -f succeeds; Bash's $(<file) then aborts this observer. A failed
+        # cat inside the conditional simply means the new root is not ready yet.
+        if [[ $(cat -- "${RESTORE_TEST_ROOT}/volumes/wg-easy/wg-easy.db" 2>/dev/null) == restored-db ]]; then
             break
         fi
         sleep 0.005

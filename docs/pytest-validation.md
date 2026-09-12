@@ -81,3 +81,12 @@ still cleaning up. The runner now gives the whole process group the remaining
 grace period before SIGKILL. A regression case checks that a surviving child can
 finish its cleanup after the parent exits; all 52 runner cases passed locally.
 Final commit and CI evidence will be recorded in the pull request.
+
+The first PR CI run failed in the restore sandbox. A local stress probe reproduced
+a race in its activation-interrupt observer: the project directory could move
+between checking the payload's existence and Bash's shorthand file read, aborting
+the fixture. The observer now tolerates that temporary absence while waiting for
+the restored payload. Production restore behavior is unchanged. After the fix,
+50 concurrent-root and 50 activation-interrupt cycles passed without retries of
+failed cases. Failure summaries also include allowlisted restore stage names;
+raw fixture output remains private.
