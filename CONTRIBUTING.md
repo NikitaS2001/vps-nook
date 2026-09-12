@@ -47,3 +47,34 @@ agreement to provide ongoing support for the resulting configuration.
 
 By submitting a contribution, you confirm that you have the right to submit
 it under the repository's [MIT License](LICENSE).
+
+## Selecting tests
+
+After `source .venv/bin/activate`, `pytest` runs quick checks and `pytest -k installer`
+selects installer checks. Use `pytest -m qemu`, `pytest -m lifecycle`,
+`pytest -m remote`, or `pytest -m release` for the corresponding suites.
+`pytest --collect-only` lists all cases without commands or fixture preparation.
+Explicit `-m` overrides the default quick selection. Empty selections return 5;
+invalid arguments return 4. Pytest collects failures; `scripts/check.sh` uses `-x`
+and stops at the first failed gate. `--e2e` runs quick then QEMU; `--release`
+runs quick, QEMU, lifecycle, then release contracts (SBOM runs once).
+
+Tests run sequentially; do not use xdist. Missing selected-suite prerequisites
+are failures. Passwordless sudo is optional only for the local installer sudo
+case; CI requires it. Each Bash adapter has a 15-minute timeout, VM/remote
+adapters 70 minutes, and lifecycle 80 minutes. Lifecycle preserves the existing
+pre-release reinstall/restore fallback and records `lifecycle_baseline_kind`
+in JUnit. A `bootstrap-snapshot` result is not released-version upgrade proof.
+Cancellation allows 30 seconds
+for cleanup before force-stopping owned processes. Daemonized QEMU ownership
+uses PID, Linux process start time and the VM disk path.
+
+Private source snapshots preserve Git history, tags and dirty source files but
+exclude ignored inventory/vault state. No deployment fixtures modify your checkout.
+Full local command logs live in a printed private `nook-pytest-logs.*` directory
+(mode 0700, files 0600); remove these after diagnosis. JUnit contains summaries,
+not captured command output. CI retains only JUnit for seven days. Use
+`pytest --junitxml=reports/local.xml`, or `NOOK_JUNIT_DIR=reports scripts/check.sh`.
+See [the migration map](docs/pytest-migration.md) and
+[acceptance evidence](docs/pytest-validation.md). Release signing and publication
+remain separate operations.

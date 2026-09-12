@@ -41,7 +41,7 @@ Supported flags:
 | `--invalid-caddy-test` | Invalid and reload-failing Caddy candidates preserve active state |
 
 Environment controls include `QEMU_IMAGE`, `QEMU_USER`, `INSTALL_REF`,
-`E2E_SOURCE_MODE`, `ZERO_TRUST_WG_TRAFFIC_MODE`, guest service ports, and host
+`E2E_SOURCE_MODE`, `NOOK_WG_TRAFFIC_MODE`, guest service ports, and host
 forwarding ports. Ubuntu 24.04 is the default image. For Debian 12:
 
 ```bash
@@ -50,7 +50,7 @@ QEMU_USER=debian \
 tests/e2e/qemu-install.sh --client-test --idempotency-test
 ```
 
-`ZERO_TRUST_WG_TRAFFIC_MODE=full` requires IPv4 egress. A dual-stack test
+`NOOK_WG_TRAFFIC_MODE=full` requires IPv4 egress. A dual-stack test
 environment additionally exercises IPv6 routing; IPv4-only hosts generate
 IPv4-only full-tunnel profiles.
 
@@ -79,9 +79,13 @@ E2E_ARTIFACT_DIR=/absolute/private/path \
   tests/e2e/lifecycle-qemu.sh
 ```
 
-The lifecycle harness deploys the immutable baseline tag, upgrades the same
-guest to the exact working tree, performs a no-change rerun, runs encrypted
-backup/restore, and verifies the stack after each boundary. It accepts no
+The lifecycle harness deploys a signed Nook baseline (`E2E_BASELINE_REF`, default
+`v2.0.0`), upgrades the same guest to the exact working tree, performs a no-change
+rerun, and runs encrypted backup/restore. Before the first Nook release exists,
+the default baseline is explicitly a working-tree snapshot: this proves
+reinstallation and restore, not an upgrade from a released version. Explicitly
+requested missing tags fail. Legacy v1 state is rejected in installer contracts;
+in-place v1 migration is not supported. It accepts no
 command-line flags; use `--help` for its environment variables. Set
 `E2E_SOURCE_FIXTURE_ONLY=1` to validate the dual-ref fixture without a VM.
 
@@ -112,16 +116,38 @@ root README. Never place live credentials in repository files, logs, or CI.
 
 Current pull-request CI runs the installer from the checked-out source in
 explicit development mode and `services` mode on Debian 12 and Ubuntu 24.04.
-Nightly automation repeats that default-mode matrix to catch upstream image
+Weekly automation runs every Monday at 02:17 UTC (Greenwich time) and supports manual dispatch
+for pre-release checks and diagnostics. It repeats that default-mode matrix to catch upstream image
 drift and adds the lifecycle upgrade/restore scenario on Ubuntu. Public-IPv6
 packet proof for `full` is a manual dual-stack scenario because generic
 GitHub-hosted runners do not guarantee IPv6 egress.
 
-The remote SSH/UFW negative cases and the repository-installer Caddy failure flags
-are available local harnesses; they are not currently part of the automated CI
-or release gate. Run them when a change touches the corresponding boundary and
-report the exact scenarios that actually completed. Persist logs only in a
+The pytest QEMU gate includes repository-installer Caddy failure scenarios.
+Remote SSH/UFW negative cases are available through `pytest -m remote`; they are
+not part of routine CI or the `check.sh --release` sequence. Run them when a change
+touches the corresponding boundary and report the exact scenarios that completed.
+Persist logs only in a
 private evidence directory and scan them for credentials before sharing.
 
 The provider firewall remains the operator's responsibility. Keep console or
 rescue access during every real deployment.
+
+## Pytest entrypoints
+
+Activate `.venv`, then use `pytest -m qemu` for services installation, client,
+idempotency, reboot, bootstrap-timeout, stopped-container and invalid-Caddy
+scenarios. `pytest -m remote` runs SSH rollback/cutover/reboot and UFW backend
+failure in a disposable VM; native `test_ssh_recovery_mocked_systemd` cases
+only render recovery tasks with mocked systemd.
+
+`pytest -m lifecycle` runs baseline/current/rerun/encrypted restore with the
+existing harness, including its explicit pre-release reinstall/restore fallback.
+The terminal and JUnit record `lifecycle_baseline_kind`; `bootstrap-snapshot`
+is not proof of an upgrade from a released version. An explicitly requested
+missing `E2E_BASELINE_REF` remains an error. All image/user/port settings above
+remain applicable.
+Run each supported platform explicitly with its image and cloud user.
+Source snapshots and deployment files are private to each test. Pytest takes
+ownership of cleanup; keep-state debugging applies only to direct Bash runs.
+Missing KVM/tools fail the selected suite. Logs remain private locally; CI
+uploads only JUnit summaries. See [acceptance evidence](../../docs/pytest-validation.md).

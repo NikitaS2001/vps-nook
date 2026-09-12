@@ -1,147 +1,79 @@
-# Ansible Zero-Trust VPS
+# VPS Nook
 
-[![CI](https://github.com/NikitaS2001/ansible-zero-trust-vps/actions/workflows/ci.yml/badge.svg)](https://github.com/NikitaS2001/ansible-zero-trust-vps/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/NikitaS2001/ansible-zero-trust-vps)](https://github.com/NikitaS2001/ansible-zero-trust-vps/releases/latest)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+**WireGuard, private DNS, and HTTPS on your VPS.**
 
-Deploy a private WireGuard entry point, filtered DNS, and internal HTTPS on a
-single VPS with Ansible.
+[![CI](https://github.com/NikitaS2001/vps-nook/actions/workflows/ci.yml/badge.svg)](https://github.com/NikitaS2001/vps-nook/actions/workflows/ci.yml)
+[![Weekly](https://github.com/NikitaS2001/vps-nook/actions/workflows/weekly.yml/badge.svg)](https://github.com/NikitaS2001/vps-nook/actions/workflows/weekly.yml)
+[![Release](https://img.shields.io/github/v/release/NikitaS2001/vps-nook)](https://github.com/NikitaS2001/vps-nook/releases)
 
-The project is designed for an operator who wants one understandable path from
-a fresh server to a small self-hosted network. It is a personal Open Source
-project, maintained on a best-effort basis without a support SLA or public
-roadmap.
+A small, self-hosted network on one server. Ansible configures the host and
+runs three services; you manage VPN clients through a web interface.
 
-## What it deploys
+| Service | What you get |
+| --- | --- |
+| WireGuard / wg-easy | VPN connections and client management |
+| AdGuard Home | DNS filtering and private service names |
+| Caddy | HTTPS for services inside your VPN |
 
-| Component | Purpose | Exposure |
-| --- | --- | --- |
-| wg-easy | WireGuard server and client management | WireGuard UDP; UI on localhost and VPN |
-| AdGuard Home | DNS filtering and internal names | Admin UI on localhost and VPN |
-| Caddy | TLS for internal services | VPN only; host TCP/443 stays closed |
+SSH and WireGuard UDP are public. Administration panels stay on localhost or
+inside the VPN. The default VPN mode reaches private services only; choose
+**All internet traffic** during setup for an internet gateway.
 
-The host is hardened with key-only SSH, UFW, Fail2Ban, a non-root administrator,
-and conservative kernel settings. Containers run on a private Docker network.
+## Before you start
 
-The default `services` mode lets VPN clients reach only the managed VPN and
-service networks. `full` requires IPv4 egress; it adds IPv6 routing only when
-the host proves IPv6 egress.
+- A **fresh Debian 12 or Ubuntu 24.04**, amd64 VPS.
+- A **1 GB RAM** plan, with at least 900 MiB visible to the OS.
+- Root or sudo access, an SSH terminal, and your computer's SSH public key.
+- TUN, WireGuard and Docker networking support, plus outbound internet access.
+- Provider console access in case you need to recover SSH.
 
-This is not a general-purpose hosting panel, multi-node VPN, cloud provisioning
-tool, or high-availability platform.
+> Installation changes SSH and the firewall. Open **TCP 2222** and
+> **UDP 51820** in your provider firewall first, or your chosen custom ports.
+> Keep your original SSH session open until a new key-based login succeeds.
 
-## Requirements
+## Install
 
-- A fresh Debian 12 or Ubuntu 24.04 VPS on amd64.
-- A 1 GB VPS plan with at least 900 MiB of RAM visible to the OS.
-- Root access or a sudo-capable account for the first installation, and an
-  interactive SSH terminal.
-- `/dev/net/tun`, WireGuard, Docker-compatible iptables/NAT, and outbound
-  access to the required package and image registries.
-- Provider-console or rescue access, plus provider firewall rules for the old
-  SSH port, new SSH port, and WireGuard UDP port.
+**v2.0.0 is in preparation. The command below is a preview, not a published
+installation endpoint.** Existing v1 installations require a separate migration;
+see [UPGRADE.md](UPGRADE.md). No existing data is moved or deleted automatically.
 
-Existing swap is reported for diagnostics only. The project never creates,
-removes, enables, disables, or tunes swap or zram.
-
-> [!WARNING]
-> Installation changes SSH and UFW. Allow the new SSH port in the provider
-> firewall first, keep the original authenticated session open, and confirm a
-> new key-authenticated login before disconnecting. Keep provider console or
-> rescue access available.
-
-## Pre-install checklist
-
-- In the provider firewall, open default SSH `TCP/2222` and WireGuard
-  `UDP/51820`. If you select custom ports, open them before installation; do
-  not remove the old SSH rule until a key-authenticated login succeeds.
-- Have the SSH public key for the administrator ready.
-- Choose a publicly reachable WireGuard endpoint: a stable IP address or DNS
-  name.
-- Prepare three distinct administrator secrets.
-
-## Verified release installation
-
-Install [GitHub CLI](https://cli.github.com/) on the VPS, then run
-`gh auth login`. Authentication lets GitHub CLI verify the release attestation.
-Run these commands from a directory that does not already contain the downloaded
-files:
-
-<!-- ssot:verified-quickstart:start -->
-
-```bash
-mkdir zero-trust-vps-install
-cd zero-trust-vps-install
-gh auth login
-gh release download v1.3.2 \
-  --repo NikitaS2001/ansible-zero-trust-vps \
-  --pattern install.sh \
-  --pattern install.sh.sha256
-gh attestation verify install.sh \
-  --repo NikitaS2001/ansible-zero-trust-vps \
-  --signer-workflow \
-    NikitaS2001/ansible-zero-trust-vps/.github/workflows/release.yml \
-    --source-ref refs/tags/v1.3.2
-sha256sum --check install.sh.sha256
-# As root:
-bash ./install.sh
-
-# As a normal user:
-sudo bash ./install.sh
+<!-- ssot:quickstart:start -->
+```text
+curl -fsSL https://github.com/NikitaS2001/vps-nook/releases/download/v2.0.0/install.sh | bash
 ```
+<!-- ssot:quickstart:end -->
 
-<!-- ssot:verified-quickstart:end -->
+After release, run this command as root on your VPS. The wizard asks for your
+VPN purpose, endpoint, SSH public key and three passwords. Press Enter to keep
+defaults; ports and internal domains are available under additional settings.
+Review the settings before applying them.
 
-The interactive installer asks for the new SSH and WireGuard settings, three
-administrator secrets, the WireGuard endpoint, internal names, and the SSH
-public key. It encrypts persistent deployment inputs in an owner-only Ansible
-Vault; plaintext credentials are not stored in Compose or normal variables.
+Piping to Bash trusts the HTTPS source of the script you execute. Prefer
+verification before execution? Follow the [verified installation](docs/getting-started.md#verified-installation).
+That guide also covers sudo, installing curl, and remote Ansible deployment.
 
-For a controller-driven deployment, follow the
-[remote Ansible path](docs/getting-started.md#remote-ansible-deployment).
+## Connect your first device
 
-## Connect the first client
+1. Use the command printed by the installer to test a **new SSH login**.
+2. Open its SSH tunnel command on your computer and visit the wg-easy panel.
+3. Create a client, import its profile into WireGuard, and connect.
+4. Trust the server's Caddy root CA on your device, then open
+   `https://wg.internal` and `https://adguard.internal`.
 
-Forward the localhost-only wg-easy UI after installation:
+See [first-client instructions and CA setup](docs/getting-started.md#first-wireguard-client).
+The installer prints your actual ports, names and certificate location.
 
-```bash
-ssh -p <ssh_port> -L 51821:127.0.0.1:51821 \
-  <admin_user>@<vps-address>
-```
+## Keep it running
 
-Keep the SSH tunnel running while you sign in, create a client, and import its
-profile into WireGuard. Connect the VPN after importing the profile; the client
-must trust the generated Caddy root CA before opening `https://wg.internal` or
-`https://adguard.internal`. The complete sequence is in
-[Getting started](docs/getting-started.md).
+- [Health checks, backups and recovery](docs/operations.md)
+- [Configuration and automated installation](docs/configuration.md)
+- [Security model and limitations](docs/security.md)
+- [Adding a private service](docs/extensions.md)
+- [Development](CONTRIBUTING.md) and [release process](docs/releasing.md)
 
-## Documentation
+VPS Nook is a personal open-source project, maintained on a best-effort basis.
+It does not provide high availability, provider firewall management or a support
+SLA. Off-host backups and alerting remain your responsibility.
 
-- [Documentation map](docs/README.md)
-- [Getting started](docs/getting-started.md)
-- [Configuration](docs/configuration.md)
-- [Operations and recovery: health, backup/restore, upgrades, SSH recovery](docs/operations.md)
-- [Security model](docs/security.md)
-- [Adding an internal service](docs/extensions.md)
-- [Release process](docs/releasing.md)
-
-The role references list stable inputs and tags:
-[hardening](roles/vps_hardening/README.md) and
-[orchestration](roles/vps_orchestration/README.md).
-
-For local development, use the two repository entry points documented in
-[CONTRIBUTING.md](CONTRIBUTING.md): `./scripts/bootstrap.sh` prepares the pinned
-toolchain and `./scripts/check.sh` runs the fast project contracts.
-
-## Contributing and security
-
-Small fixes that preserve the minimal design are welcome; see
-[CONTRIBUTING.md](CONTRIBUTING.md). The [security model](docs/security.md)
-reduces public exposure: only hardened SSH and WireGuard UDP are public, while
-services stay inside the private Docker/VPN network. Report vulnerabilities
-through the private channel described in [SECURITY.md](SECURITY.md), never
-through a public issue.
-
-## License
-
-[MIT](LICENSE)
+Report vulnerabilities privately through [SECURITY.md](SECURITY.md).
+Licensed under [MIT](LICENSE).

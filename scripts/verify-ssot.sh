@@ -76,7 +76,7 @@ check(required_docs <= actual_docs,
 readme = read_override("VERIFY_SSOT_README_PATH", "README.md")
 
 release_url_pattern = re.compile(
-    r"https://github\.com/NikitaS2001/ansible-zero-trust-vps/releases/"
+    r"https://github\.com/NikitaS2001/vps-nook/releases/"
     r"(?:latest/download|download/v[0-9]+\.[0-9]+\.[0-9]+)/install\.sh"
 )
 publication_marker = "<!-- release-installer: post-merge-maintainer-publication -->"
@@ -264,11 +264,12 @@ if environ.get("VERIFY_SSOT_README_PATH"):
 
 start_marker = "<!-- ssot:verified-quickstart:start -->"
 end_marker = "<!-- ssot:verified-quickstart:end -->"
-check(readme.count(start_marker) == 1 and readme.count(end_marker) == 1,
-      "README.md must contain one verified-quickstart marker pair")
+verified_doc = read("docs/getting-started.md")
+check(verified_doc.count(start_marker) == 1 and verified_doc.count(end_marker) == 1,
+      "Getting started must contain one verified-quickstart marker pair")
 quickstart = ""
-if start_marker in readme and end_marker in readme:
-    quickstart = readme.split(start_marker, 1)[1].split(end_marker, 1)[0]
+if start_marker in verified_doc and end_marker in verified_doc:
+    quickstart = verified_doc.split(start_marker, 1)[1].split(end_marker, 1)[0]
 
 installer = read("install.sh")
 release_match = re.search(
@@ -278,14 +279,25 @@ release_match = re.search(
 )
 release_ref = release_match.group(1) if release_match else ""
 check(bool(release_ref), "install.sh must define a SemVer OFFICIAL_RELEASE_REF")
+quick_start = "<!-- ssot:quickstart:start -->"
+quick_end = "<!-- ssot:quickstart:end -->"
+check(readme.count(quick_start) == 1 and readme.count(quick_end) == 1,
+      "README must contain one quickstart marker pair")
+preview = readme.split(quick_start, 1)[-1].split(quick_end, 1)[0]
+expected_command = f"curl -fsSL https://github.com/NikitaS2001/vps-nook/releases/download/{release_ref}/install.sh | bash"
+check(expected_command in preview, "quickstart must match the official release tag and repository")
+check("latest/download" not in preview, "quickstart must pin a version")
+check("HTTPS source" in readme, "quickstart must describe its trust boundary")
+if "```text" in preview:
+    check(f"{release_ref} is in preparation" in readme, "unpublished quickstart needs an explicit preparation notice")
 required_quickstart_fragments = [
     f"gh release download {release_ref}",
-    "--repo NikitaS2001/ansible-zero-trust-vps",
+    "--repo NikitaS2001/vps-nook",
     "--pattern install.sh",
     "--pattern install.sh.sha256",
     "gh attestation verify install.sh",
     "--signer-workflow",
-    "NikitaS2001/ansible-zero-trust-vps/.github/workflows/release.yml",
+    "NikitaS2001/vps-nook/.github/workflows/release.yml",
     f"--source-ref refs/tags/{release_ref}",
     "sha256sum --check install.sh.sha256",
     "sudo bash ./install.sh",
@@ -412,6 +424,11 @@ for path in markdown_files:
             }
             check(unquote(anchor).lower() in target_headings,
                   f"{relative} has broken Markdown anchor: {target}")
+
+check("pytest==9.1.1" in read("requirements-dev.txt"), "pytest development pin is missing")
+check((root / "pytest.ini").is_file(), "pytest configuration is missing")
+check((root / "tests/registry.py").is_file(), "pytest contract registry is missing")
+check(not (root / "tests/validation/manifest.txt").exists(), "legacy test dispatcher manifest remains")
 
 if errors:
     for error in errors:

@@ -30,7 +30,7 @@ import yaml
 
 root = Path(os.environ["WORKFLOW_ROOT"])
 workflow_dir = root / ".github" / "workflows"
-required = {"ci.yml", "nightly.yml", "scorecard.yml"}
+required = {"ci.yml", "weekly.yml", "scorecard.yml"}
 present = {path.name for path in workflow_dir.glob("*.yml")}
 missing = required - present
 if missing:
@@ -72,22 +72,46 @@ service_steps = [step for step in ci_jobs["qemu"].get("steps", []) if step.get("
 if len(service_steps) != 1 or "services" not in str(service_steps[0]):
     sys.exit("workflow-contract: CI does not explicitly run services")
 
-nightly = documents["nightly.yml"]
-if nightly.get("permissions") != {"contents": "read"}:
-    sys.exit("workflow-contract: nightly.yml permissions are not contents: read")
-nightly_jobs = nightly["jobs"]
-if set(nightly_jobs) != {"qemu", "lifecycle"}:
-    sys.exit("workflow-contract: nightly.yml lacks QEMU or lifecycle jobs")
-matrix = nightly_jobs["qemu"].get("strategy", {}).get("matrix", {})
+weekly = documents["weekly.yml"]
+triggers = weekly.get("on", {})
+if triggers.get("schedule") != [{"cron": "17 2 * * 1"}] or "workflow_dispatch" not in triggers:
+    sys.exit("workflow-contract: Weekly must run on Mondays at 02:17 UTC and support manual dispatch")
+if "nightly.yml" in present:
+    sys.exit("workflow-contract: obsolete nightly.yml remains")
+if weekly.get("permissions") != {"contents": "read"}:
+    sys.exit("workflow-contract: weekly.yml permissions are not contents: read")
+weekly_jobs = weekly["jobs"]
+if set(weekly_jobs) != {"qemu", "lifecycle"}:
+    sys.exit("workflow-contract: weekly.yml lacks QEMU or lifecycle jobs")
+matrix = weekly_jobs["qemu"].get("strategy", {}).get("matrix", {})
 includes = matrix.get("include", [])
 if {row.get("os") for row in includes} != {"debian-12", "ubuntu-24.04"}:
-    sys.exit("workflow-contract: nightly OS matrix is incomplete")
-service_steps = [step for step in nightly_jobs["qemu"].get("steps", []) if step.get("name") == "Run services E2E"]
-if len(service_steps) != 1 or service_steps[0].get("env", {}).get("ZERO_TRUST_WG_TRAFFIC_MODE") != "services":
-    sys.exit("workflow-contract: generic hosted nightly must use services")
-lifecycle_runs = [step.get("run", "") for step in nightly_jobs["lifecycle"].get("steps", [])]
-if lifecycle_runs.count("tests/e2e/lifecycle-qemu.sh") != 1:
-    sys.exit("workflow-contract: nightly lifecycle does not test upgrade and restore")
+    sys.exit("workflow-contract: weekly OS matrix is incomplete")
+service_steps = [step for step in weekly_jobs["qemu"].get("steps", []) if step.get("name") == "Run services E2E"]
+if len(service_steps) != 1 or service_steps[0].get("env", {}).get("NOOK_WG_TRAFFIC_MODE") != "services":
+    sys.exit("workflow-contract: generic hosted weekly must use services")
+lifecycle_runs = [step.get("run", "") for step in weekly_jobs["lifecycle"].get("steps", [])]
+if lifecycle_runs.count(".venv/bin/pytest -m lifecycle --junitxml=reports/lifecycle.xml") != 1:
+    sys.exit("workflow-contract: weekly lifecycle does not test upgrade and restore")
+
+for name, jobs in (("ci", ci_jobs), ("weekly", weekly_jobs)):
+    for job_name, job in jobs.items():
+        steps = job.get("steps", [])
+        if sum(step.get("run") == "scripts/bootstrap.sh" for step in steps) != 1:
+            sys.exit("workflow-contract: each test job must bootstrap pinned tools")
+        uploads = [step for step in steps if "actions/upload-artifact@" in step.get("uses", "")]
+        if len(uploads) != 1 or uploads[0].get("if") != "always()":
+            sys.exit("workflow-contract: every test job needs an unconditional JUnit upload")
+        artifact = uploads[0].get("with", {})
+        if artifact.get("retention-days") != 7 or not artifact.get("path", "").startswith("reports/"):
+            sys.exit("workflow-contract: upload only test summaries for seven days")
+        if job_name == "qemu":
+            if job.get("timeout-minutes") != 80:
+                sys.exit("workflow-contract: QEMU needs 80 minutes including cleanup/reporting")
+            if sum(step.get("run") == ".venv/bin/pytest -m qemu --junitxml=reports/qemu.xml" for step in steps) != 1:
+                sys.exit("workflow-contract: QEMU must use the pytest adapter")
+if ci_jobs["qemu"].get("needs") != "static":
+    sys.exit("workflow-contract: QEMU must follow quick checks")
 
 scorecard = documents["scorecard.yml"]
 analysis = scorecard["jobs"].get("analysis", {})
