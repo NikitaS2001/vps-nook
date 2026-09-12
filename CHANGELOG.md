@@ -2,6 +2,17 @@
 
 Notable changes are recorded here. The project follows Semantic Versioning.
 
+## [v2.0.0] - Unreleased
+
+- Rename the project to VPS Nook, with NOOK_* inputs and new server paths.
+- Reject legacy installations before deployment; automatic v1 migration is not supported.
+- Add a terminal setup wizard, inline input validation, and first-client guidance.
+- Repair SSH validation, socket activation ordering, and local/remote cutover recovery.
+- Enforce the AdGuard bcrypt limit in UTF-8 bytes before accepting a password.
+- Separate quick installation from optional pre-execution release verification.
+- Unify native fixtures, Bash contracts and QEMU scenarios under pytest with private diagnostics and bounded cleanup.
+- Run QEMU and lifecycle/restore weekly on Mondays at 02:17 UTC, with manual dispatch for pre-release checks.
+
 ## [v1.3.2] - 2026-08-31
 
 - Derive the SPDX source checksum from deterministic Git tree data so independently built release assets match byte-for-byte.

@@ -28,7 +28,7 @@ wg-easy bootstrap values are first-start inputs; later UI changes are not
 silently replaced by Ansible.
 
 The public installer maintains the same logical values in its private encrypted
-vault under `/etc/zero-trust-vps` and preserves them across reruns.
+vault under `/etc/vps-nook` and preserves them across reruns.
 
 ## Traffic policy
 
@@ -100,3 +100,36 @@ change rather than local overrides.
 Neither role manages swap or zram. A host with less than 900 MiB of RAM visible
 to the OS is rejected even if it has swap; this threshold normally corresponds
 to a 1 GB VPS plan after hypervisor reservations.
+
+## Automated installer inputs
+
+Run `bash install.sh --help` for the complete input contract. Set these variables
+on the **Bash process executing the installer**, not on the curl process. Use a
+protected automation secret store; do not put passwords in command arguments,
+shell history or repository files.
+
+| Variable | Meaning |
+| --- | --- |
+| `NOOK_NONINTERACTIVE=1` | Disable terminal prompts; required for automation |
+| `NOOK_ADMIN_PASSWORD` | Fresh-install local account password, at least 8 characters |
+| `NOOK_ADGUARD_PASSWORD` | Fresh-install DNS panel password, at least 8 characters and at most 72 UTF-8 bytes |
+| `NOOK_WG_PASSWORD` | Fresh-install VPN panel password, at least 12 characters |
+| `NOOK_SSH_PUBKEY` | Fresh-install administrator's OpenSSH public key |
+| `NOOK_WG_HOST` | Public WireGuard hostname or IPv4; detected when omitted |
+| `NOOK_WG_TRAFFIC_MODE` | `services` (default) or `full` |
+| `NOOK_SSH_PORT`, `NOOK_WG_PORT` | Optional ports; defaults come from the roles |
+| `NOOK_ADMIN_USER` | Optional administrator username |
+| `NOOK_INTERNAL_DOMAIN_SUFFIX` | Optional internal DNS suffix |
+| `NOOK_INTERNAL_DOMAINS` | Optional pair of distinct internal hostnames |
+
+On rerun omit credential inputs. Supplied ordinary settings must match the saved
+vault. The interactive wizard also reuses saved inputs; it cannot silently rotate
+credentials or change routing.
+
+`NOOK_DEV_MODE=1` allows `NOOK_REPO_URL` and `NOOK_RELEASE_REF` for disposable
+development fixtures only. Production accepts the built-in repository and release.
+`NO_COLOR` disables terminal colors. No progress control codes are emitted to logs.
+
+For operational scripts, `NOOK_PROJECT_ROOT` selects an explicit project root and
+`NOOK_KEEP_BACKUPS` sets backup retention. These are not installer path overrides.
+All old `ZERO_TRUST_*` inputs are rejected, with values omitted from diagnostics.

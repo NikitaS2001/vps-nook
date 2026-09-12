@@ -46,7 +46,7 @@ diagnostics and is never modified. Package upgrades are opt-in.
 
 Remote deployments require whole-file encrypted Ansible Vault files with mode
 `0600`. The public installer creates a root-owned encrypted vault and random
-vault password under `/etc/zero-trust-vps`. It removes temporary plaintext and
+vault password under `/etc/vps-nook`. It removes temporary plaintext and
 signer files on success or failure.
 
 Credentials are not accepted through legacy plaintext variables. Compose does

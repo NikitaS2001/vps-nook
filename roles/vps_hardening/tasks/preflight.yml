@@ -47,6 +47,26 @@
     quiet: true
   tags: [always, preflight]
 
+- name: "VPS Hardening | Preflight | Inspect legacy deployment paths"
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - /opt/zero-trust-vps
+    - /opt/zero-trust-vps-installer
+    - /etc/zero-trust-vps
+    - /opt/zt-backups
+  register: vps_hardening_legacy_paths
+  tags: [always, preflight]
+
+- name: "VPS Hardening | Preflight | Reject unsupported v1 migration"
+  ansible.builtin.assert:
+    that:
+      - vps_hardening_legacy_paths.results | selectattr('stat.exists') | list | length == 0
+    quiet: true
+    fail_msg: "Legacy deployment found. VPS Nook requires a fresh VPS; see UPGRADE.md before changing any data."
+  tags: [always, preflight]
+
 - name: "VPS Hardening | Preflight | Check TUN device"
   ansible.builtin.stat:
     path: /dev/net/tun

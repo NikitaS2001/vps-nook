@@ -4,6 +4,7 @@
     name: "{{ ssh_service_name }}"
     state: restarted
   listen: restart sshd
+  when: not (vps_hardening_ssh_rollback | default(false) | bool)
 
 - name: Reload sysctl
   ansible.builtin.command: sysctl --system

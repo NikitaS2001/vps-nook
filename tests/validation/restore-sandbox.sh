@@ -35,8 +35,8 @@ tree_digest() {
 
 assert_no_restore_siblings() {
     if find "${ACTIVE_SANDBOX}/parent" -maxdepth 1 \
-        \( -name '.zero-trust-restore.stage.*' -o -name '.zero-trust-restore.rollback.*' \
-        -o -name '.zero-trust-restore.failed.*' -o -name '.zero-trust-restore.archive.*' \) \
+        \( -name '.nook-restore.stage.*' -o -name '.nook-restore.rollback.*' \
+        -o -name '.nook-restore.failed.*' -o -name '.nook-restore.archive.*' \) \
         -print -quit | grep -q .; then
         fail "restore left a staging, rollback, failed, or archive sibling"
     fi
@@ -45,7 +45,7 @@ assert_no_restore_siblings() {
 new_sandbox() {
     ACTIVE_SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/zt-restore-test.XXXXXX")"
     mkdir -p "${ACTIVE_SANDBOX}/bin" "${ACTIVE_SANDBOX}/parent"
-    export RESTORE_TEST_ROOT="${ACTIVE_SANDBOX}/parent/zero-trust-vps"
+    export RESTORE_TEST_ROOT="${ACTIVE_SANDBOX}/parent/vps-nook"
     export RESTORE_TEST_LOG="${ACTIVE_SANDBOX}/events"
     export RESTORE_TEST_STATE="${ACTIVE_SANDBOX}/state"
     : >"${RESTORE_TEST_LOG}"
@@ -105,17 +105,17 @@ make_project() {
 
 make_archive() {
     local marker="$1" source="${ACTIVE_SANDBOX}/archive-source"
-    make_project "${source}/zero-trust-vps" "${marker}"
-    tar -czf "${ACTIVE_SANDBOX}/restore.tar.gz" -C "${source}" zero-trust-vps
+    make_project "${source}/vps-nook" "${marker}"
+    tar -czf "${ACTIVE_SANDBOX}/restore.tar.gz" -C "${source}" vps-nook
 }
 
 run_restore() {
     local archive="$1" mode="${2:-success}"
     PATH="${ACTIVE_SANDBOX}/bin:${PATH}" \
         RESTORE_TEST_MODE="${mode}" \
-        ZERO_TRUST_PROJECT_ROOT="${RESTORE_TEST_ROOT}" \
-        ZERO_TRUST_RESTORE_READY_TIMEOUT="${RESTORE_TEST_READY_TIMEOUT:-1}" \
-        ZERO_TRUST_RESTORE_READY_INTERVAL=0.05 \
+        NOOK_PROJECT_ROOT="${RESTORE_TEST_ROOT}" \
+        NOOK_RESTORE_READY_TIMEOUT="${RESTORE_TEST_READY_TIMEOUT:-1}" \
+        NOOK_RESTORE_READY_INTERVAL=0.05 \
         bash "${RESTORE}" "${archive}" "${ACTIVE_SANDBOX}/identity" \
         >"${ACTIVE_SANDBOX}/stdout" 2>"${ACTIVE_SANDBOX}/stderr"
 }
@@ -143,12 +143,12 @@ run_round_trip() {
     printf 'identity\n' >"${ACTIVE_SANDBOX}/identity"
     if [[ ${mode} == encrypted ]]; then
         PATH="${ACTIVE_SANDBOX}/bin:${PATH}" RESTORE_TEST_MODE=success \
-            AGE_KEY=test-recipient ZERO_TRUST_PROJECT_ROOT="${RESTORE_TEST_ROOT}" \
+            AGE_KEY=test-recipient NOOK_PROJECT_ROOT="${RESTORE_TEST_ROOT}" \
             bash "${BACKUP}" "${output}" >"${ACTIVE_SANDBOX}/backup.out" 2>"${ACTIVE_SANDBOX}/backup.err"
         archive="${output}.age"
     else
         PATH="${ACTIVE_SANDBOX}/bin:${PATH}" RESTORE_TEST_MODE=success \
-            ZERO_TRUST_PROJECT_ROOT="${RESTORE_TEST_ROOT}" \
+            NOOK_PROJECT_ROOT="${RESTORE_TEST_ROOT}" \
             bash "${BACKUP}" --allow-plaintext "${output}" \
             >"${ACTIVE_SANDBOX}/backup.out" 2>"${ACTIVE_SANDBOX}/backup.err"
         archive="${output}"
@@ -190,50 +190,50 @@ run_malicious() {
             printf 'sentinel\n' >"${outside}"
             ;;
         symlink)
-            mkdir -p "${ACTIVE_SANDBOX}/payload/zero-trust-vps"
-            ln -s "${outside}" "${ACTIVE_SANDBOX}/payload/zero-trust-vps/link"
-            tar -czf "${archive}" -C "${ACTIVE_SANDBOX}/payload" zero-trust-vps
+            mkdir -p "${ACTIVE_SANDBOX}/payload/vps-nook"
+            ln -s "${outside}" "${ACTIVE_SANDBOX}/payload/vps-nook/link"
+            tar -czf "${archive}" -C "${ACTIVE_SANDBOX}/payload" vps-nook
             ;;
         hardlink)
-            mkdir -p "${ACTIVE_SANDBOX}/payload/zero-trust-vps"
-            printf 'linked\n' >"${ACTIVE_SANDBOX}/payload/zero-trust-vps/source"
-            ln "${ACTIVE_SANDBOX}/payload/zero-trust-vps/source" "${ACTIVE_SANDBOX}/payload/zero-trust-vps/hardlink"
-            tar -czf "${archive}" -C "${ACTIVE_SANDBOX}/payload" zero-trust-vps
+            mkdir -p "${ACTIVE_SANDBOX}/payload/vps-nook"
+            printf 'linked\n' >"${ACTIVE_SANDBOX}/payload/vps-nook/source"
+            ln "${ACTIVE_SANDBOX}/payload/vps-nook/source" "${ACTIVE_SANDBOX}/payload/vps-nook/hardlink"
+            tar -czf "${archive}" -C "${ACTIVE_SANDBOX}/payload" vps-nook
             ;;
         special)
-            mkdir -p "${ACTIVE_SANDBOX}/payload/zero-trust-vps"
-            mkfifo "${ACTIVE_SANDBOX}/payload/zero-trust-vps/fifo"
-            tar -czf "${archive}" -C "${ACTIVE_SANDBOX}/payload" zero-trust-vps
+            mkdir -p "${ACTIVE_SANDBOX}/payload/vps-nook"
+            mkfifo "${ACTIVE_SANDBOX}/payload/vps-nook/fifo"
+            tar -czf "${archive}" -C "${ACTIVE_SANDBOX}/payload" vps-nook
             ;;
         duplicate)
-            mkdir -p "${ACTIVE_SANDBOX}/payload/zero-trust-vps"
-            printf 'duplicate\n' >"${ACTIVE_SANDBOX}/payload/zero-trust-vps/file"
-            tar -czf "${archive}" -C "${ACTIVE_SANDBOX}/payload" zero-trust-vps/file zero-trust-vps/file
+            mkdir -p "${ACTIVE_SANDBOX}/payload/vps-nook"
+            printf 'duplicate\n' >"${ACTIVE_SANDBOX}/payload/vps-nook/file"
+            tar -czf "${archive}" -C "${ACTIVE_SANDBOX}/payload" vps-nook/file vps-nook/file
             ;;
         normalized-duplicate)
-            mkdir -p "${ACTIVE_SANDBOX}/payload/zero-trust-vps"
-            printf 'duplicate\n' >"${ACTIVE_SANDBOX}/payload/zero-trust-vps/file"
-            tar -czf "${archive}" -C "${ACTIVE_SANDBOX}/payload" zero-trust-vps/file zero-trust-vps/./file
+            mkdir -p "${ACTIVE_SANDBOX}/payload/vps-nook"
+            printf 'duplicate\n' >"${ACTIVE_SANDBOX}/payload/vps-nook/file"
+            tar -czf "${archive}" -C "${ACTIVE_SANDBOX}/payload" vps-nook/file vps-nook/./file
             ;;
         file-dir-conflict)
             printf 'file\n' >"${ACTIVE_SANDBOX}/payload/file"
             printf 'child\n' >"${ACTIVE_SANDBOX}/payload/child"
-            tar -cf "${ACTIVE_SANDBOX}/first.tar" -C "${ACTIVE_SANDBOX}/payload" --transform='s,^file$,zero-trust-vps/path,' file
-            tar -rf "${ACTIVE_SANDBOX}/first.tar" -C "${ACTIVE_SANDBOX}/payload" --transform='s,^child$,zero-trust-vps/path/child,' child
+            tar -cf "${ACTIVE_SANDBOX}/first.tar" -C "${ACTIVE_SANDBOX}/payload" --transform='s,^file$,vps-nook/path,' file
+            tar -rf "${ACTIVE_SANDBOX}/first.tar" -C "${ACTIVE_SANDBOX}/payload" --transform='s,^child$,vps-nook/path/child,' child
             gzip -c "${ACTIVE_SANDBOX}/first.tar" >"${archive}"
             ;;
         symlink-prefix)
-            mkdir -p "${ACTIVE_SANDBOX}/payload/zero-trust-vps"
-            ln -s "${outside}" "${ACTIVE_SANDBOX}/payload/zero-trust-vps/link"
+            mkdir -p "${ACTIVE_SANDBOX}/payload/vps-nook"
+            ln -s "${outside}" "${ACTIVE_SANDBOX}/payload/vps-nook/link"
             printf 'child\n' >"${ACTIVE_SANDBOX}/payload/child"
-            tar -cf "${ACTIVE_SANDBOX}/first.tar" -C "${ACTIVE_SANDBOX}/payload" zero-trust-vps/link
-            tar -rf "${ACTIVE_SANDBOX}/first.tar" -C "${ACTIVE_SANDBOX}/payload" --transform='s,^child$,zero-trust-vps/link/child,' child
+            tar -cf "${ACTIVE_SANDBOX}/first.tar" -C "${ACTIVE_SANDBOX}/payload" vps-nook/link
+            tar -rf "${ACTIVE_SANDBOX}/first.tar" -C "${ACTIVE_SANDBOX}/payload" --transform='s,^child$,vps-nook/link/child,' child
             gzip -c "${ACTIVE_SANDBOX}/first.tar" >"${archive}"
             ;;
         wrong-root)
-            mkdir -p "${ACTIVE_SANDBOX}/payload/not-zero-trust-vps"
-            printf 'wrong\n' >"${ACTIVE_SANDBOX}/payload/not-zero-trust-vps/file"
-            tar -czf "${archive}" -C "${ACTIVE_SANDBOX}/payload" not-zero-trust-vps
+            mkdir -p "${ACTIVE_SANDBOX}/payload/not-vps-nook"
+            printf 'wrong\n' >"${ACTIVE_SANDBOX}/payload/not-vps-nook/file"
+            tar -czf "${archive}" -C "${ACTIVE_SANDBOX}/payload" not-vps-nook
             ;;
         *) fail "unknown malicious class ${attack_class}" ;;
     esac
@@ -290,7 +290,7 @@ run_failure_case() {
         grep -F 'prior stack failed to restart' "${ACTIVE_SANDBOX}/stderr" >/dev/null \
             || fail "rollback restart failure was not reported"
         find "${ACTIVE_SANDBOX}/parent" -maxdepth 1 -type d \
-            -name '.zero-trust-restore.failed.*' -print -quit | grep -q . \
+            -name '.nook-restore.failed.*' -print -quit | grep -q . \
             || fail "rollback restart failure did not preserve the failed restored tree"
     else
         assert_no_restore_siblings
@@ -319,7 +319,7 @@ run_lock_contention() {
     make_archive restored
     printf 'identity\n' >"${ACTIVE_SANDBOX}/identity"
     before="$(tree_digest "${RESTORE_TEST_ROOT}")"
-    exec {lock_fd}>"${ACTIVE_SANDBOX}/parent/.zero-trust-restore.lock"
+    exec {lock_fd}>"${ACTIVE_SANDBOX}/parent/.nook-restore.lock"
     flock -n "${lock_fd}"
     set +e; run_restore "${ACTIVE_SANDBOX}/restore.tar.gz" success; rc=$?; set -e
     flock -u "${lock_fd}"
@@ -366,9 +366,9 @@ run_activation_interrupt() {
     before="$(tree_digest "${RESTORE_TEST_ROOT}")"
     PATH="${ACTIVE_SANDBOX}/bin:${PATH}" \
         RESTORE_TEST_MODE=readiness-timeout \
-        ZERO_TRUST_PROJECT_ROOT="${RESTORE_TEST_ROOT}" \
-        ZERO_TRUST_RESTORE_READY_TIMEOUT=10 \
-        ZERO_TRUST_RESTORE_READY_INTERVAL=0.05 \
+        NOOK_PROJECT_ROOT="${RESTORE_TEST_ROOT}" \
+        NOOK_RESTORE_READY_TIMEOUT=10 \
+        NOOK_RESTORE_READY_INTERVAL=0.05 \
         bash "${RESTORE}" "${ACTIVE_SANDBOX}/restore.tar.gz" "${ACTIVE_SANDBOX}/identity" \
         >"${ACTIVE_SANDBOX}/stdout" 2>"${ACTIVE_SANDBOX}/stderr" &
     pid=$!
@@ -438,7 +438,7 @@ run_concurrent_root() {
     make_archive restored
     printf 'identity\n' >"${ACTIVE_SANDBOX}/identity"
     (
-        while ! find "${ACTIVE_SANDBOX}/parent" -maxdepth 1 -type d -name '.zero-trust-restore.stage.*' -print -quit | grep -q .; do sleep 0.005; done
+        while ! find "${ACTIVE_SANDBOX}/parent" -maxdepth 1 -type d -name '.nook-restore.stage.*' -print -quit | grep -q .; do sleep 0.005; done
         mkdir "${RESTORE_TEST_ROOT}"
         printf 'competitor\n' >"${RESTORE_TEST_ROOT}/state"
     ) &

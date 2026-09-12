@@ -3,7 +3,7 @@
 Please do not report suspected vulnerabilities in a public issue or pull
 request.
 
-Use [GitHub Private Vulnerability Reporting](https://github.com/NikitaS2001/ansible-zero-trust-vps/security/advisories/new)
+Use [GitHub Private Vulnerability Reporting](https://github.com/NikitaS2001/vps-nook/security/advisories/new)
 to send a private report. Include the affected release or commit, deployment
 context, reproduction steps, and any logs or proof of concept needed to
 validate the issue. Remove credentials, private keys, hostnames, and other
@@ -16,7 +16,7 @@ than disclosing the issue publicly.
 ## Supported versions
 
 Only the current stable release listed on the
-[Releases page](https://github.com/NikitaS2001/ansible-zero-trust-vps/releases)
+[Releases page](https://github.com/NikitaS2001/vps-nook/releases)
 is supported for security fixes. Older releases and unreleased development
 branches are not covered by a backport commitment.
 

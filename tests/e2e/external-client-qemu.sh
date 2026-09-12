@@ -116,7 +116,7 @@ cleanup() {
         QEMU_PID="$(<"${TMP_DIR}/qemu.pid")"
     fi
     if [[ -f "${TMP_DIR}/f3-dns-injected" ]]; then
-        if ! "${SSH_CMD[@]}" "sudo sed -i 's/answer: 10.8.0.1/answer: 10.66.0.3/' /opt/zero-trust-vps/volumes/adguard/conf/AdGuardHome.yaml && sudo docker restart adguard >/dev/null"; then
+        if ! "${SSH_CMD[@]}" "sudo sed -i 's/answer: 10.8.0.1/answer: 10.66.0.3/' /opt/vps-nook/volumes/adguard/conf/AdGuardHome.yaml && sudo docker restart adguard >/dev/null"; then
             cleanup_ok=false
         fi
     fi
@@ -131,10 +131,10 @@ import os
 import re
 import sqlite3
 
-db_path = "/opt/zero-trust-vps/volumes/wg-easy/wg-easy.db"
+db_path = "/opt/vps-nook/volumes/wg-easy/wg-easy.db"
 with sqlite3.connect(db_path) as db:
     db.execute("DELETE FROM clients_table WHERE public_key = ?", (os.environ["PEER_PUBLIC_KEY"],))
-config_path = "/opt/zero-trust-vps/volumes/wg-easy/wg0.conf"
+config_path = "/opt/vps-nook/volumes/wg-easy/wg0.conf"
 data = open(config_path, encoding="utf-8").read()
 parts = re.split(r"(?=^\[Peer\]\n)", data, flags=re.M)
 data = "".join(part for part in parts if os.environ["PEER_PUBLIC_KEY"] not in part)
@@ -155,7 +155,7 @@ CLEAN_PEER
         if "${SSH_CMD[@]}" "sudo docker exec wg-easy wg show wg0 | grep -q '${CLIENT_PUB}'" >/dev/null 2>&1; then
             runtime_gone=false
         fi
-        if "${SSH_CMD[@]}" "sudo grep -q '${CLIENT_PUB}' /opt/zero-trust-vps/volumes/wg-easy/wg0.conf" >/dev/null 2>&1; then
+        if "${SSH_CMD[@]}" "sudo grep -q '${CLIENT_PUB}' /opt/vps-nook/volumes/wg-easy/wg0.conf" >/dev/null 2>&1; then
             file_gone=false
         fi
         if ! "${SSH_CMD[@]}" sudo env PEER_PUBLIC_KEY="${CLIENT_PUB}" bash -se <<'VERIFY_DATABASE'
@@ -164,7 +164,7 @@ python3 - <<'PY'
 import os
 import sqlite3
 
-with sqlite3.connect("/opt/zero-trust-vps/volumes/wg-easy/wg-easy.db") as db:
+with sqlite3.connect("/opt/vps-nook/volumes/wg-easy/wg-easy.db") as db:
     if db.execute("SELECT 1 FROM clients_table WHERE public_key = ?", (os.environ["PEER_PUBLIC_KEY"],)).fetchone():
         raise SystemExit(1)
 PY
@@ -235,7 +235,7 @@ chmod 0600 "${peer_tmp}"
 mv -f -- "${peer_tmp}" "${TMP_DIR}/peer.env"
 
 if [[ "${F3_LITERAL_DNS}" == 1 ]]; then
-    "${SSH_CMD[@]}" "sudo grep -Fqx '      answer: 10.66.0.3' /opt/zero-trust-vps/volumes/adguard/conf/AdGuardHome.yaml && sudo sed -i 's/answer: 10.66.0.3/answer: 10.8.0.1/' /opt/zero-trust-vps/volumes/adguard/conf/AdGuardHome.yaml && sudo docker restart adguard >/dev/null"
+    "${SSH_CMD[@]}" "sudo grep -Fqx '      answer: 10.66.0.3' /opt/vps-nook/volumes/adguard/conf/AdGuardHome.yaml && sudo sed -i 's/answer: 10.66.0.3/answer: 10.8.0.1/' /opt/vps-nook/volumes/adguard/conf/AdGuardHome.yaml && sudo docker restart adguard >/dev/null"
     printf 'f3-dns-injected-v1\n' >"${TMP_DIR}/f3-dns-injected"
 fi
 
@@ -252,7 +252,7 @@ import sqlite3
 
 path = "/var/tmp/zt-f3-peer-registration"
 private_key, public_key, preshared_key, allowed = open(path, encoding="ascii").read().splitlines()
-db_path = "/opt/zero-trust-vps/volumes/wg-easy/wg-easy.db"
+db_path = "/opt/vps-nook/volumes/wg-easy/wg-easy.db"
 with sqlite3.connect(db_path) as db:
     conflict = db.execute(
         "SELECT 1 FROM clients_table WHERE name = ? OR ipv4_address = ? OR public_key = ?",
@@ -282,7 +282,7 @@ pass "peer ${CLIENT_IP} registered on the VPS"
 
 echo "[E2E] fetching the private root CA from the VPS"
 ROOT_CA="${TMP_DIR}/root.crt"
-"${SSH_CMD[@]}" 'sudo cat /opt/zero-trust-vps-installer/repo/fetched_certs/localhost/root.crt' \
+"${SSH_CMD[@]}" 'sudo cat /opt/vps-nook-installer/repo/fetched_certs/localhost/root.crt' \
     2>/dev/null | grep -v setlocale > "${ROOT_CA}"
 chmod 600 "${ROOT_CA}"
 grep -q 'BEGIN CERTIFICATE' "${ROOT_CA}" || fail "root CA could not be fetched"

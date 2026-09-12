@@ -1,7 +1,7 @@
 # Operations and recovery
 
 The public installer retains its verified checkout at
-`/opt/zero-trust-vps-installer/repo`; the direct commands below use that path.
+`/opt/vps-nook-installer/repo`; the direct commands below use that path.
 A remote Ansible deployment leaves the checkout on the controller. In that
 case, stream the script from the same tagged controller checkout instead of
 downloading a second copy, for example:
@@ -11,7 +11,7 @@ ssh -p <ssh_port> <admin_user>@<vps-address> \
   'sudo bash -s --' < scripts/synthetic-check.sh
 ```
 
-The scripts default to `/opt/zero-trust-vps`; set `ZERO_TRUST_PROJECT_ROOT`
+The scripts default to `/opt/vps-nook`; set `NOOK_PROJECT_ROOT`
 only for an intentional alternate deployment root. Backup and restore use the
 same `sudo bash -s -- [arguments] < scripts/<name>.sh` pattern when the checkout
 is on the controller.
@@ -19,7 +19,7 @@ is on the controller.
 ## Health check
 
 ```bash
-sudo /opt/zero-trust-vps-installer/repo/scripts/synthetic-check.sh
+sudo /opt/vps-nook-installer/repo/scripts/synthetic-check.sh
 ```
 
 The check verifies container state, wg-easy authentication readiness, internal
@@ -36,20 +36,20 @@ recipient:
 
 ```bash
 sudo env AGE_KEY="age1..." \
-  /opt/zero-trust-vps-installer/repo/scripts/backup.sh
+  /opt/vps-nook-installer/repo/scripts/backup.sh
 ```
 
 The output is an age-encrypted `.tar.gz.age` file with mode `0600`. It includes
 managed Compose/Caddy configuration, volumes, and an optional Compose override.
 Copy it off-host and test restoration regularly. The default retention is 14
-files under `/opt/zt-backups`; `ZERO_TRUST_KEEP_BACKUPS` changes that count.
+files under `/opt/vps-nook-backups`; `NOOK_KEEP_BACKUPS` changes that count.
 
 > [!WARNING]
 > `--allow-plaintext` deliberately writes an unencrypted archive containing
 > private service data. Use it only with a separately protected destination.
 
 ```bash
-sudo /opt/zero-trust-vps-installer/repo/scripts/backup.sh \
+sudo /opt/vps-nook-installer/repo/scripts/backup.sh \
   --allow-plaintext /secure/path/backup.tar.gz
 ```
 
@@ -66,7 +66,7 @@ prior project.
 > before running it.
 
 ```bash
-sudo /opt/zero-trust-vps-installer/repo/scripts/restore.sh \
+sudo /opt/vps-nook-installer/repo/scripts/restore.sh \
   /path/to/backup.tar.gz.age /path/to/age-identity.txt
 ```
 
@@ -104,10 +104,10 @@ firewall access if both SSH sessions are lost.
 ## Service troubleshooting
 
 ```bash
-cd /opt/zero-trust-vps
+cd /opt/vps-nook
 sudo docker compose ps
 sudo docker compose logs --tail=100 wg-easy adguard caddy
-sudo /opt/zero-trust-vps-installer/repo/scripts/synthetic-check.sh
+sudo /opt/vps-nook-installer/repo/scripts/synthetic-check.sh
 ```
 
 Do not restart Caddy directly after editing a site. Rerun Ansible so the role

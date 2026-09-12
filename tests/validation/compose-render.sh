@@ -9,6 +9,13 @@ FIXTURE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/compose-render.XXXXXX")"
 ACTIVE_COMPOSE_FILE=""
 ACTIVE_OVERRIDE_FILE=""
 cleanup() {
+  local status=$?
+  if (( status != 0 )); then
+    printf '[FAIL] compose-render failed; fixture diagnostics follow (synthetic inputs only).\n' >&2
+    for log in "${FIXTURE_ROOT}"/*.log; do
+      [[ ! -f ${log} ]] || tail -n 35 "${log}" >&2
+    done
+  fi
   if [[ -n "${ACTIVE_COMPOSE_FILE}" && -n "${ACTIVE_OVERRIDE_FILE}" ]]; then
     docker compose -f "${ACTIVE_COMPOSE_FILE}" -f "${ACTIVE_OVERRIDE_FILE}" \
       down --remove-orphans >/dev/null 2>&1 || true
@@ -128,6 +135,12 @@ PY
   if [[ "${case_name}" == "completed" ]]; then
     return
   fi
+  # Runtime assertion concerns environment bytes only. Do not allocate the
+  # production subnets: a developer may already have the real stack running.
+  cat >>"${override_path}" <<'YAML'
+    networks: !reset []
+    network_mode: none
+YAML
   ACTIVE_COMPOSE_FILE="${rendered_path}"
   ACTIVE_OVERRIDE_FILE="${override_path}"
   docker compose -f "${rendered_path}" -f "${override_path}" \

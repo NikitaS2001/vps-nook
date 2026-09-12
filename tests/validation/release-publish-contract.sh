@@ -41,7 +41,7 @@ set -Eeuo pipefail
 printf '%s\n' "$*" >>"${GH_CALL_LOG}"
 case "${1:-} ${2:-}" in
     'auth status') exit 0 ;;
-    'repo view') printf 'NikitaS2001/ansible-zero-trust-vps\n' ;;
+    'repo view') printf 'NikitaS2001/vps-nook\n' ;;
     'api --method') printf '%s\n' "${IMMUTABLE_ENABLED}" ;;
     'release view') printf 'v1.3.0\n' ;;
     'release download')
@@ -109,7 +109,7 @@ run_fixture() {
     esac
 }
 
-canonical='https://github.com/NikitaS2001/ansible-zero-trust-vps.git'
+canonical='https://github.com/NikitaS2001/vps-nook.git'
 run_fixture wrong-repository true https://github.com/example/other.git
 run_fixture immutable-disabled false "${canonical}"
 run_fixture attestation-failure true "${canonical}"

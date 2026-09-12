@@ -12,7 +12,7 @@ upstream artifacts are in [`defaults/main.yml`](defaults/main.yml).
 
 | Input | Default | Meaning |
 | --- | --- | --- |
-| `project_root` | `/opt/zero-trust-vps` | Managed Compose, Caddy, and service-data root |
+| `project_root` | `/opt/vps-nook` | Managed Compose, Caddy, and service-data root |
 | `wg_traffic_mode` | `services` | Server-enforced `services` or IPv4 `full` policy with optional IPv6 |
 | `docker_network_subnet` | `10.66.0.0/24` | Private service IPv4 network |
 | `docker_network_ipv6_subnet` | `fd00:67:0:0::/64` | Private service IPv6 network |

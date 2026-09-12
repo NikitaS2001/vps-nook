@@ -83,7 +83,7 @@ run_draft_fixture() {
             RUNNER_TEMP="${tmp}/runner" \
             GITHUB_STEP_SUMMARY="${tmp}/${mode}.summary" \
             TAG=v1.3.0 \
-            GITHUB_REPOSITORY=NikitaS2001/ansible-zero-trust-vps \
+            GITHUB_REPOSITORY=NikitaS2001/vps-nook \
             GITHUB_SHA=0000000000000000000000000000000000000000 \
             GH_CALL_LOG="${log}" \
             GH_DELETE_SENTINEL="${sentinel}" \

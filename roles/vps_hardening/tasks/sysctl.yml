@@ -2,7 +2,7 @@
 - name: "VPS Hardening | Sysctl | Apply kernel hardening settings"
   ansible.builtin.template:
     src: sysctl.conf.j2
-    dest: /etc/sysctl.d/99-zero-trust.conf
+    dest: /etc/sysctl.d/99-vps-nook.conf
     backup: yes
     mode: '0644'
   when: ansible_facts['virtualization_type'] not in ['lxc', 'openvz']
@@ -10,7 +10,7 @@
   tags: [sysctl]
 
 - name: "VPS Hardening | Sysctl | Apply sysctl immediately"
-  ansible.builtin.command: sysctl -p /etc/sysctl.d/99-zero-trust.conf
+  ansible.builtin.command: sysctl -p /etc/sysctl.d/99-vps-nook.conf
   register: vps_hardening_sysctl_apply
   when: ansible_facts['virtualization_type'] not in ['lxc', 'openvz']
   changed_when: false

@@ -1,5 +1,5 @@
 ---
-- name: "Zero-Trust VPN | Preflight"
+- name: "VPS Nook | Hardening"
   hosts: vps
   gather_facts: yes
   become: yes
@@ -7,7 +7,7 @@
     - role: vps_hardening
       tags: [hardening]
 
-- name: "Zero-Trust VPN | Orchestration"
+- name: "VPS Nook | Orchestration"
   hosts: vps
   gather_facts: yes
   become: yes

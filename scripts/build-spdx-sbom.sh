@@ -118,9 +118,9 @@ def base_package(spdx_id: str, name: str, version: str, location: str) -> dict:
 
 source = base_package(
     "SPDXRef-Package-Source",
-    "ansible-zero-trust-vps",
+    "vps-nook",
     tag,
-    f"git+https://github.com/NikitaS2001/ansible-zero-trust-vps.git@{sha}",
+    f"git+https://github.com/NikitaS2001/vps-nook.git@{sha}",
 )
 source["checksums"] = [
     {"algorithm": "SHA1", "checksumValue": sha},
@@ -168,9 +168,9 @@ document = {
     "spdxVersion": "SPDX-2.3",
     "dataLicense": "CC0-1.0",
     "SPDXID": "SPDXRef-DOCUMENT",
-    "name": f"ansible-zero-trust-vps-{tag}",
+    "name": f"vps-nook-{tag}",
     "documentNamespace": (
-        "https://github.com/NikitaS2001/ansible-zero-trust-vps/"
+        "https://github.com/NikitaS2001/vps-nook/"
         f"releases/download/{tag}/sbom.spdx.json?sha={sha}"
     ),
     "creationInfo": {
