@@ -1,4 +1,4 @@
-# VPS Nook v2.0.0 (unreleased)
+# VPS Nook v2.0.0
 
 A shorter name and a guided terminal installation for your private VPS network.
 
@@ -10,4 +10,4 @@ A shorter name and a guided terminal installation for your private VPS network.
 - Unified pytest checks and weekly QEMU/lifecycle automation with private diagnostics.
 
 This is a breaking release. Automatic migration from v1 is not supported; see
-[UPGRADE.md](UPGRADE.md). Publication requires passing the documented release checks.
+[UPGRADE.md](UPGRADE.md). Verify the release assets before running the installer.

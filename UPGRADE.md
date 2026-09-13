@@ -1,6 +1,6 @@
 # VPS Nook v2 compatibility
 
-v2.0.0 is in preparation. It is a breaking rename, not an in-place upgrade from v1.
+v2.0.0 is a breaking rename, not an in-place upgrade from v1.
 
 ## Existing v1 installations
 
