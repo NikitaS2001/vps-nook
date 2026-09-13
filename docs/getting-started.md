@@ -15,19 +15,19 @@ Neither role modifies swap or zram.
 
 ## Quick installation
 
-The root README contains the canonical version-pinned command. v2.0.0 is still
-in preparation; wait for its publication before using the preview URLs.
-If curl is missing, install it first:
+The root README contains the canonical command for the latest published stable
+release. If curl is missing, install it first:
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y ca-certificates curl
 ```
 
-After publication, a sudo-capable user can use this variant:
+Then a sudo-capable user can use this variant:
 
-```text
-curl -fsSL https://github.com/NikitaS2001/vps-nook/releases/download/v2.0.0/install.sh | sudo bash
+<!-- release-installer: post-merge-maintainer-publication -->
+```bash
+curl -fsSL https://github.com/NikitaS2001/vps-nook/releases/latest/download/install.sh | sudo bash
 ```
 
 Both commands require an SSH terminal for prompts, even though the script arrives
@@ -41,8 +41,9 @@ already executing. Use the following path for verification before execution.
 
 ## Verified installation
 
-The v2.0.0 release must be published first. Install [GitHub CLI](https://cli.github.com/)
-and authenticate with `gh auth login`. Use a new download directory.
+For a version-pinned installation, install [GitHub CLI](https://cli.github.com/)
+and authenticate with `gh auth login`. Use a new download directory. The steps
+below bind the download and attestation identity to v2.0.0.
 
 <!-- ssot:verified-quickstart:start -->
 ```bash
@@ -67,7 +68,8 @@ The installer verifies the SSH-signed tag, checks out its exact commit and shows
 the effective settings before applying server roles. Source-verification packages
 may already be installed when you cancel; secrets are removed from temporary files.
 
-Reruns reuse the authoritative encrypted inputs under `/etc/vps-nook`; see
+Reruns reuse the authoritative encrypted inputs under `/etc/vps-nook`. Use the
+installer for the same pinned release instead of resolving `latest` again. See
 [automated inputs](configuration.md#automated-installer-inputs) and
 [upgrade compatibility](../UPGRADE.md). Do not mix controller deployments with
 installer state. Malformed vaults are preserved for recovery, never replaced.

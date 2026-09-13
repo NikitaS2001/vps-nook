@@ -77,6 +77,11 @@ gh release verify "${tag}" --repo "${REPOSITORY}" \
     --json isDraft,isImmutable,tagName \
     --jq 'select(.isDraft == false and .isImmutable == true) | .tagName')" == "${tag}" ]] \
     || fail "published release is not immutable"
+latest_tag="$(gh api "/repos/${REPOSITORY}/releases/latest" --jq '.tag_name')" \
+    || fail "cannot read GitHub's latest release"
+[[ "${latest_tag}" == "${tag}" ]] \
+    || fail "GitHub latest release does not match ${tag}"
+pass "GitHub latest release is ${tag}"
 gh release download "${tag}" --repo "${REPOSITORY}" --dir "${workspace}/published"
 scripts/release-contract.sh \
     --assets "${workspace}/published" --tag "${tag}" --sha "${sha}"

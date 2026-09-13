@@ -5,6 +5,8 @@ import shutil
 from contextlib import nullcontext
 from pathlib import Path
 import tempfile
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 import pytest
 
@@ -69,6 +71,28 @@ def log_dir(request):
     path = Path(tempfile.mkdtemp(prefix="nook-pytest-logs."))
     path.chmod(0o700)
     request.config._nook_log_dir = path
+    return path
+
+
+@pytest.fixture(scope="session")
+def release_status_fixture(tmp_path_factory):
+    """Record live availability for executable release URLs without logging redirects."""
+    urls = (
+        "https://github.com/NikitaS2001/vps-nook/releases/latest/download/install.sh",
+    )
+    path = tmp_path_factory.mktemp("release-status") / "statuses"
+    rows = []
+    for url in urls:
+        try:
+            with urlopen(Request(url, method="HEAD"), timeout=30) as response:
+                status = response.status
+        except (OSError, URLError):
+            pytest.fail("published installer availability check failed", pytrace=False)
+        if not 200 <= status < 300:
+            pytest.fail(f"published installer availability returned HTTP {status}", pytrace=False)
+        rows.append(f"{url} {status}\n")
+    path.write_text("".join(rows), encoding="utf-8")
+    path.chmod(0o600)
     return path
 
 

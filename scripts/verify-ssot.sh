@@ -284,12 +284,11 @@ quick_end = "<!-- ssot:quickstart:end -->"
 check(readme.count(quick_start) == 1 and readme.count(quick_end) == 1,
       "README must contain one quickstart marker pair")
 preview = readme.split(quick_start, 1)[-1].split(quick_end, 1)[0]
-expected_command = f"curl -fsSL https://github.com/NikitaS2001/vps-nook/releases/download/{release_ref}/install.sh | bash"
-check(expected_command in preview, "quickstart must match the official release tag and repository")
-check("latest/download" not in preview, "quickstart must pin a version")
+latest_command = "curl -fsSL https://github.com/NikitaS2001/vps-nook/releases/latest/download/install.sh | bash"
+check(latest_command in preview, "quickstart must use the latest published release")
+check("/main/install.sh" not in readme and "/raw/main/" not in readme,
+      "public installation must not execute installer bytes from main")
 check("HTTPS source" in readme, "quickstart must describe its trust boundary")
-if "```text" in preview:
-    check(f"{release_ref} is in preparation" in readme, "unpublished quickstart needs an explicit preparation notice")
 required_quickstart_fragments = [
     f"gh release download {release_ref}",
     "--repo NikitaS2001/vps-nook",
@@ -344,6 +343,8 @@ check("scripts/publish-release.sh" in releasing,
       "docs/releasing.md must name the local final publisher")
 check("--draft=false" in read("scripts/publish-release.sh"),
       "local publisher must perform the final draft-to-public transition")
+check("/releases/latest" in read("scripts/publish-release.sh"),
+      "local publisher must verify GitHub's latest release after publication")
 
 def table_inputs(relative: str) -> set[str]:
     text = read(relative)
