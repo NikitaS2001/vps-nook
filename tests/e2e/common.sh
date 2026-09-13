@@ -423,13 +423,34 @@ PYINTENT
 import os
 from pathlib import Path
 import sys
+import tempfile
+
 registry, directory = map(Path, sys.argv[1:])
 pid = int((directory / "qemu.pid").read_text())
 started = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
 record = registry / f"{pid}.record"
-fd = os.open(record, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-with os.fdopen(fd, "w") as stream:
-    stream.write(f"{pid}\n{started}\n{directory}\n")
+fd, temporary = tempfile.mkstemp(prefix=f".{pid}.record.", dir=registry)
+published = False
+try:
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w") as stream:
+        stream.write(f"{pid}\n{started}\n{directory}\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.link(temporary, record)
+    published = True
+    os.unlink(temporary)
+    directory_fd = os.open(registry, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+finally:
+    if not published:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
 PYREG
     fi
     sleep 2

@@ -38,31 +38,96 @@
   changed_when: false
   tags: [ssh]
 
+- name: "SSH | Snapshot | Normalize SSH service fact key"
+  ansible.builtin.set_fact:
+    vps_hardening_ssh_service_fact_name: "{{ (ssh_service_name | regex_replace('\\.service$', '')) ~ '.service' }}"
+  tags: [ssh]
+
 - name: "SSH | Snapshot | Preserve recovery state"
   ansible.builtin.set_fact:
-    vps_hardening_original_ssh_service: "{{ ansible_facts.services[ssh_service_name ~ '.service'] }}"
+    vps_hardening_original_ssh_service: "{{ ansible_facts.services[vps_hardening_ssh_service_fact_name] }}"
     vps_hardening_original_ssh_socket: >-
       {{ {'state': ('running' if 'ActiveState=active' in vps_hardening_original_socket_properties.stdout_lines else 'stopped'),
           'status': ('enabled' if 'UnitFileState=enabled' in vps_hardening_original_socket_properties.stdout_lines else 'disabled')}
          if 'LoadState=loaded' in vps_hardening_original_socket_properties.stdout_lines else {} }}
-    vps_hardening_original_ssh_ports: >-
-      {{ ((vps_hardening_original_listeners.stdout_lines | select('search', 'sshd')
-             | map('regex_replace', '[ \t]+', ' ') | map('trim') | map('split') | map(attribute=3) | map('regex_replace', '^.*:', '')
-             | select('match', '^[0-9]+$') | list)
-          or ((vps_hardening_original_socket_properties.stdout | default('')
-               | regex_findall('[: ]([0-9]+) [(]Stream[)]'))
-              if 'ActiveState=active' in vps_hardening_original_socket_properties.stdout_lines else [])
-          or (vps_hardening_original_sshd.stdout_lines | select('match', '^port [0-9]+$')
-              | map('regex_replace', '^port ', '') | list)) | unique | list }}
     vps_hardening_ssh_activation_started: false
     vps_hardening_ssh_rollback: false
   tags: [ssh]
 
-- name: "SSH | Snapshot | Require original recovery ports"
+- name: "SSH | Snapshot | Initialize original SSH listeners"
+  ansible.builtin.set_fact:
+    vps_hardening_original_ssh_listeners: []
+    vps_hardening_original_ssh_listener_endpoints: []
+  tags: [ssh]
+
+- name: "SSH | Snapshot | Preserve listeners from active sshd"
+  ansible.builtin.set_fact:
+    vps_hardening_original_ssh_listeners: >-
+      {{ vps_hardening_original_ssh_listeners + [{
+          'address': item | regex_replace('^(.*):[0-9]+$', '\1') | regex_replace('^\[|\]$', ''),
+          'port': item | regex_replace('^.*:([0-9]+)$', '\1') | int
+      }] }}
+    vps_hardening_original_ssh_listener_endpoints: "{{ vps_hardening_original_ssh_listener_endpoints + [item] }}"
+  loop: >-
+    {{ vps_hardening_original_listeners.stdout_lines | select('search', 'sshd')
+       | map('regex_replace', '[ \t]+', ' ') | map('trim') | map('split') | map(attribute=3) | list }}
+  when:
+    - item is match('^.*:[0-9]+$')
+    - item not in vps_hardening_original_ssh_listener_endpoints
+  tags: [ssh]
+
+- name: "SSH | Snapshot | Preserve listeners from active socket"
+  ansible.builtin.set_fact:
+    vps_hardening_original_ssh_listeners: >-
+      {{ vps_hardening_original_ssh_listeners + [{
+          'address': item | regex_replace('^(.*):[0-9]+$', '\1') | regex_replace('^\[|\]$', ''),
+          'port': item | regex_replace('^.*:([0-9]+)$', '\1') | int
+      }] }}
+    vps_hardening_original_ssh_listener_endpoints: "{{ vps_hardening_original_ssh_listener_endpoints + [item] }}"
+  loop: >-
+    {{ vps_hardening_original_socket_properties.stdout_lines
+       | select('match', '^Listen=.* [(]Stream[)]$')
+       | map('regex_replace', '^Listen=(.*) [(]Stream[)]$', '\1') | list }}
+  when:
+    - vps_hardening_original_ssh_listeners | length == 0
+    - "'ActiveState=active' in vps_hardening_original_socket_properties.stdout_lines"
+    - item is match('^.*:[0-9]+$')
+    - item not in vps_hardening_original_ssh_listener_endpoints
+  tags: [ssh]
+
+- name: "SSH | Snapshot | Preserve listeners from sshd configuration"
+  ansible.builtin.set_fact:
+    vps_hardening_original_ssh_listeners: >-
+      {{ vps_hardening_original_ssh_listeners + [{
+          'address': item | regex_replace('^listenaddress (.*):[0-9]+$', '\1') | regex_replace('^\[|\]$', ''),
+          'port': item | regex_replace('^.*:([0-9]+)$', '\1') | int
+      }] }}
+    vps_hardening_original_ssh_listener_endpoints: "{{ vps_hardening_original_ssh_listener_endpoints + [item] }}"
+  loop: "{{ vps_hardening_original_sshd.stdout_lines | select('match', '^listenaddress .*:[0-9]+$') | list }}"
+  when:
+    - vps_hardening_original_ssh_listeners | length == 0
+    - item not in vps_hardening_original_ssh_listener_endpoints
+  tags: [ssh]
+
+- name: "SSH | Snapshot | Preserve loopback ports from sshd configuration"
+  ansible.builtin.set_fact:
+    vps_hardening_original_ssh_listeners: >-
+      {{ vps_hardening_original_ssh_listeners + [{
+          'address': '127.0.0.1',
+          'port': item | regex_replace('^port ', '') | int
+      }] }}
+    vps_hardening_original_ssh_listener_endpoints: "{{ vps_hardening_original_ssh_listener_endpoints + [item] }}"
+  loop: "{{ vps_hardening_original_sshd.stdout_lines | select('match', '^port [0-9]+$') | list }}"
+  when:
+    - vps_hardening_original_ssh_listeners | length == 0
+    - item not in vps_hardening_original_ssh_listener_endpoints
+  tags: [ssh]
+
+- name: "SSH | Snapshot | Require original recovery listeners"
   ansible.builtin.assert:
     that:
-      - vps_hardening_original_ssh_ports | length > 0
-    fail_msg: "Cannot establish original SSH ports; refusing cutover."
+      - vps_hardening_original_ssh_listeners | length > 0
+    fail_msg: "Cannot establish original SSH listeners; refusing cutover."
   tags: [ssh]
 
 - name: "SSH | Config | Apply and verify hardened sshd_config"
@@ -204,11 +269,11 @@
 
     - name: "SSH | Rescue | Check original local listeners"
       ansible.builtin.wait_for:
-        host: 127.0.0.1
-        port: "{{ item | int }}"
+        host: "{{ '127.0.0.1' if item.address in ['0.0.0.0', '*'] else '::1' if item.address == '::' else item.address }}"
+        port: "{{ item.port | int }}"
         state: started
         timeout: 10
-      loop: "{{ vps_hardening_original_ssh_ports }}"
+      loop: "{{ vps_hardening_original_ssh_listeners }}"
       when: vps_hardening_ssh_activation_started | bool
       tags: [ssh]
 

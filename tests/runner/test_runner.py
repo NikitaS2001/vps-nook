@@ -125,6 +125,78 @@ def test_vm_wrong_ownership_rejected(tmp_path):
         cleanup_vms(tmp_path, grace=0.1)
 
 
+@pytest.mark.parametrize("record", ["", "partial\n", "partial\nrecord\n"],
+                         ids=["empty", "one-line", "two-line"])
+def test_incomplete_vm_record_uses_valid_intent(tmp_path, record):
+    executable = tmp_path / "qemu-system-fixture"
+    executable.symlink_to(sys.executable)
+    directory = tmp_path / "vm"
+    directory.mkdir()
+    child = subprocess.Popen([str(executable), "-c",
+                              "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(300)",
+                              f"file={directory}/disk.qcow2"], start_new_session=True)
+    try:
+        time.sleep(0.1)
+        started = process_identity(child.pid)
+        pidfile = tmp_path / "vm.pid"
+        pidfile.write_text(str(child.pid))
+        (tmp_path / "vm.intent").write_text(f"{pidfile}\n{started}\n{directory}\n")
+        (tmp_path / "vm.record").write_text(record)
+        cleanup_vms(tmp_path, grace=0.1)
+        assert child.wait(timeout=5) == -signal.SIGKILL
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+
+
+@pytest.mark.parametrize("race_stage", ["cmdline", "sigterm"])
+def test_vm_exit_race_during_cleanup(tmp_path, monkeypatch, race_stage):
+    import tests.support as support
+
+    executable = tmp_path / "qemu-system-fixture"
+    executable.symlink_to(sys.executable)
+    directory = tmp_path / "vm"
+    directory.mkdir()
+    child = subprocess.Popen([str(executable), "-c", "import time; time.sleep(300)",
+                              f"file={directory}/disk.qcow2"], start_new_session=True)
+    try:
+        started = process_identity(child.pid)
+        (tmp_path / "vm.record").write_text(f"{child.pid}\n{started}\n{directory}\n")
+        if race_stage == "cmdline":
+            original_identity = support.process_identity
+            checked = False
+
+            def process_identity_after_exit(pid):
+                nonlocal checked
+                value = original_identity(pid)
+                if pid == child.pid and value == started and not checked:
+                    checked = True
+                    child.terminate()
+                    child.wait(timeout=5)
+                    return started
+                return value
+
+            monkeypatch.setattr(support, "process_identity", process_identity_after_exit)
+        else:
+            original_kill = support.os.kill
+
+            def signal_after_exit(pid, sig):
+                if pid == child.pid and sig == signal.SIGTERM:
+                    original_kill(child.pid, sig)
+                    child.wait(timeout=5)
+                    raise ProcessLookupError
+                return original_kill(pid, sig)
+
+            monkeypatch.setattr(support.os, "kill", signal_after_exit)
+        cleanup_vms(tmp_path, grace=0.1)
+        assert child.poll() is not None
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+
+
 @pytest.mark.parametrize("detached", [False, True], ids=["branch", "detached-merge"])
 def test_snapshot_preserves_dirty_sources_excludes_secrets(tmp_path, detached):
     source = tmp_path / "source"
@@ -143,15 +215,23 @@ def test_snapshot_preserves_dirty_sources_excludes_secrets(tmp_path, detached):
         git("checkout", "--detach", "-q")
         git("-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
             "commit", "--allow-empty", "-qm", "detached merge fixture")
+    (source / "tracked").write_text("staged")
+    git("add", "tracked")
     (source / "tracked").write_text("dirty")
     (source / "deleted").unlink()
     (source / "new").write_text("new")
     (source / "vault").write_text("operator secret")
     result = snapshot(source, tmp_path / "copy")
     assert (result / "tracked").read_text() == "dirty"
+    assert subprocess.check_output(["git", "-C", str(result), "show", ":tracked"]) == b"dirty"
     assert (result / "new").read_text() == "new"
+    assert subprocess.check_output(["git", "-C", str(result), "show", ":new"]) == b"new"
     assert not (result / "vault").exists()
     assert not (result / "deleted").exists()
+    assert subprocess.run(["git", "-C", str(result), "ls-files", "--error-unmatch", "deleted"],
+                          capture_output=True).returncode == 1
+    assert set(subprocess.check_output(["git", "-C", str(result), "diff", "--cached", "--name-status"]).splitlines()) == {
+        b"M\ttracked", b"D\tdeleted", b"A\tnew"}
     assert (source / "vault").read_text() == "operator secret"
     assert subprocess.check_output(["git", "-C", str(result), "rev-parse", "HEAD"]) == subprocess.check_output(
         ["git", "-C", str(source), "rev-parse", "HEAD"])
@@ -160,6 +240,31 @@ def test_snapshot_preserves_dirty_sources_excludes_secrets(tmp_path, detached):
         assert subprocess.check_output(["git", "-C", str(source), "rev-parse", "--abbrev-ref", "HEAD"]).strip() == b"HEAD"
     assert subprocess.check_output(["git", "-C", str(result), "tag", "--list"]).strip() == b"fixture-baseline"
 
+
+def test_snapshot_ignores_repository_git_environment(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    def git(*args):
+        return subprocess.run(["git", "-C", str(source), *args], check=True, capture_output=True)
+    git("init", "-q")
+    (source / "tracked").write_text("original")
+    git("add", "tracked")
+    git("-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
+        "commit", "-qm", "fixture")
+    (source / "tracked").write_text("dirty")
+    source_tree = git("write-tree").stdout
+    source_head = git("rev-parse", "HEAD").stdout
+    source_diff = git("diff", "--cached").stdout
+    monkeypatch.setenv("GIT_DIR", str(source / ".git"))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(source / ".git/index"))
+    result = snapshot(source, tmp_path / "copy")
+    assert subprocess.check_output(["git", "write-tree"]) == source_tree
+    assert subprocess.check_output(["git", "rev-parse", "HEAD"]) == source_head
+    assert subprocess.check_output(["git", "diff", "--cached"]) == source_diff
+    monkeypatch.delenv("GIT_DIR")
+    monkeypatch.delenv("GIT_INDEX_FILE")
+    assert (result / ".git").resolve() != (source / ".git").resolve()
+    assert subprocess.check_output(["git", "-C", str(result), "show", ":tracked"]) == b"dirty"
 
 @pytest.fixture
 def tiny_suite(tmp_path, source_root):

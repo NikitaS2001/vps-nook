@@ -26,23 +26,32 @@ def snapshot(source, destination):
     destination.mkdir(mode=0o700)
     # A local clone owns its Git metadata and objects, retaining history and tags.
     # Never copy operator Git configuration, hooks, ignored inventory or vault files.
+    git_environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    git_environment.update({
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "core.hooksPath",
+        "GIT_CONFIG_VALUE_0": os.devnull,
+    })
     subprocess.run(["git", "clone", "--quiet", "--no-hardlinks", "--no-checkout", str(source), str(destination)],
-                   check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+                   check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                   timeout=30, env=git_environment)
     branch = subprocess.run(["git", "-C", str(destination), "symbolic-ref", "-q", "HEAD"],
-                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL, timeout=30)
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            timeout=30, env=git_environment)
     if branch.returncode == 1:
         # PR merge checkouts may have no branch at HEAD. The Bash fixture uses
         # a branch name when constructing its guest-local development origin.
         for arguments in (("branch", "nook-pytest-source", "HEAD"),
                           ("symbolic-ref", "HEAD", "refs/heads/nook-pytest-source")):
             subprocess.run(["git", "-C", str(destination), *arguments], check=True,
-                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=30)
+                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=30, env=git_environment)
     elif branch.returncode:
         raise CommandFailure("could not inspect private Git snapshot HEAD")
     paths = subprocess.check_output(["git", "-C", str(source), "ls-files", "-z", "--cached", "--others",
-                                     "--exclude-standard"], stdin=subprocess.DEVNULL, timeout=30).split(b"\0")
+                                     "--exclude-standard"], stdin=subprocess.DEVNULL, timeout=30, env=git_environment).split(b"\0")
     for raw in set(paths) - {b""}:
         relative = Path(os.fsdecode(raw))
         src, dst = source / relative, destination / relative
@@ -53,9 +62,10 @@ def snapshot(source, destination):
             raise CommandFailure("source snapshot refuses symlinks outside regular source files")
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
-    # Populate the index without replacing dirty/deleted worktree files.
-    subprocess.run(["git", "-C", str(destination), "reset", "--mixed", "--quiet", "HEAD"],
-                   check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+    # The staged index must exactly match the materialized tree that gitleaks scans.
+    subprocess.run(["git", "-C", str(destination), "add", "--all", "--"], check=True,
+                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                   timeout=30, env=git_environment)
     return destination
 
 
@@ -97,18 +107,31 @@ def cleanup_vms(registry, grace=30):
         if started is not None and int(started) >= int(earliest):
             records.append((value, started, directory))
     for record in registry.glob("*.record"):
-        records.append(tuple(record.read_text().splitlines()))
+        try:
+            fields = record.read_text().splitlines()
+        except FileNotFoundError:
+            continue
+        if len(fields) == 3 and all(fields) and fields[0].isdigit() and fields[1].isdigit():
+            records.append(tuple(fields))
     for pid_text, started, directory in set(records):
         pid = int(pid_text)
         if process_identity(pid) != started:
             continue
-        command = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+        try:
+            command = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+        except (FileNotFoundError, ProcessLookupError):
+            continue
         if not command or b"qemu-system-" not in command[0] or not any(
             os.fsencode(str(Path(directory) / "disk.qcow2")) in arg for arg in command
         ):
             raise CommandFailure("VM ownership verification failed")
+        if process_identity(pid) != started:
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
         owned.append((pid, started))
-        os.kill(pid, signal.SIGTERM)
     deadline = time.monotonic() + grace
     while owned and time.monotonic() < deadline:
         owned = [(pid, start) for pid, start in owned if process_identity(pid) == start]
@@ -116,7 +139,10 @@ def cleanup_vms(registry, grace=30):
             time.sleep(0.1)
     for pid, start in owned:
         if process_identity(pid) == start:
-            os.kill(pid, signal.SIGKILL)
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                continue
     if owned:
         time.sleep(0.1)
     if any(process_identity(pid) == start for pid, start in owned):
