@@ -47,6 +47,8 @@ done
 ROOT_TARGET="${VPS_ROOT_USER}@${VPS_IP}"
 command -v ssh-keygen >/dev/null || fail "ssh-keygen not found"
 command -v openssl >/dev/null || fail "openssl not found"
+command -v nc >/dev/null || fail "nc not found"
+command -v timeout >/dev/null || fail "timeout not found"
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ztvps-vps.XXXXXX")"
 trap 'rm -rf "${TMP_DIR}"' EXIT
@@ -175,9 +177,9 @@ SWAP_AFTER="$(run_remote_authenticated "${ADMIN_USER}@${VPS_IP}" "${SSH_PORT_IN}
 pass "provider swap configuration unchanged"
 run_remote_authenticated "${ADMIN_USER}@${VPS_IP}" "${SSH_PORT_IN}" \
     "${ADMIN_SSH_KEY}" "${KNOWN_HOSTS}" \
-    "sudo test '\$(stat -c %a /etc/vps-nook)' = 700 && sudo test '\$(stat -c %a /etc/vps-nook/installer-vault.yml)' = 600 && sudo grep -Fq '\$ANSIBLE_VAULT;' /etc/vps-nook/installer-vault.yml"
+    "test \"\$(sudo stat -c %a /etc/vps-nook)\" = 700 && test \"\$(sudo stat -c %a /etc/vps-nook/installer-vault.yml)\" = 600 && sudo grep -Fq '\$ANSIBLE_VAULT;' /etc/vps-nook/installer-vault.yml"
 pass "installer secrets persisted only in a private encrypted vault"
-if command -v nc >/dev/null && nc -z -w 5 "${VPS_IP}" 443 >/dev/null 2>&1; then
+if timeout 6 nc -z -w 5 "${VPS_IP}" 443 >/dev/null 2>&1; then
     fail "public TCP/443 is reachable"
 fi
 pass "public TCP/443 is closed"
