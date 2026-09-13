@@ -87,6 +87,31 @@ grep -Fq 'if ! sudo test -s /etc/vps-nook/installer-vault.yml; then' \
     printf 'qemu-source-contract: public VPS reruns must omit fresh credential inputs\n' >&2
     exit 1
 }
+# These assertions intentionally match literal command substitutions in the harness.
+# shellcheck disable=SC2016
+if grep -Fq '\$(stat -c %a /etc/vps-nook)' \
+    "${ROOT_DIR}/tests/e2e/run-public-install.sh"; then
+    printf 'qemu-source-contract: private installer state must be inspected through sudo\n' >&2
+    exit 1
+fi
+# shellcheck disable=SC2016
+grep -Fq '\$(sudo stat -c %a /etc/vps-nook)' \
+    "${ROOT_DIR}/tests/e2e/run-public-install.sh" || {
+    printf 'qemu-source-contract: installer state directory mode check is missing\n' >&2
+    exit 1
+}
+# shellcheck disable=SC2016
+grep -Fq 'command -v nc >/dev/null || fail "nc not found"' \
+    "${ROOT_DIR}/tests/e2e/run-public-install.sh" || {
+    printf 'qemu-source-contract: public port probe prerequisite is not enforced\n' >&2
+    exit 1
+}
+# shellcheck disable=SC2016
+grep -Fq 'if timeout 6 nc -z -w 5 "${VPS_IP}" 443' \
+    "${ROOT_DIR}/tests/e2e/run-public-install.sh" || {
+    printf 'qemu-source-contract: public port probe must have an outer timeout\n' >&2
+    exit 1
+}
 installer_release_ref="$(sed -n 's/^readonly OFFICIAL_RELEASE_REF="\([^"]*\)"$/\1/p' \
     "${ROOT_DIR}/install.sh")"
 # Fixture intentionally matches the literal command substitution in the E2E source.
