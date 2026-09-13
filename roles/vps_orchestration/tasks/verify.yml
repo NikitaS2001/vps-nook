@@ -123,7 +123,7 @@
 - name: "Verify | Summary | Print completion message"
   ansible.builtin.debug:
     msg:
-      - "✅ Zero-Trust VPN deployment complete!"
+      - "✅ VPS Nook deployment complete!"
       - "📄 Root CA: {{ fetched_certs_dir }}/{{ inventory_hostname }}/root.crt"
       - "🔗 WireGuard panel: https://{{ wg_internal_domain }} (or http://127.0.0.1:{{ wg_easy_bootstrap_ui_port }} over an SSH tunnel)"
       - "🔗 AdGuard panel: https://{{ adguard_internal_domain }}"

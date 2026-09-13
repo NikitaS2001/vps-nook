@@ -13,13 +13,13 @@
 # in this file and in the Caddy site block. Keep the files named
 # examples/vaultwarden-*.
 #
-# 1. mkdir -p /opt/zero-trust-vps/volumes/vaultwarden /opt/zero-trust-vps/Caddyfile.d
-# 2. Copy this file to /opt/zero-trust-vps/docker-compose.override.yml
+# 1. mkdir -p /opt/vps-nook/volumes/vaultwarden /opt/vps-nook/Caddyfile.d
+# 2. Copy this file to /opt/vps-nook/docker-compose.override.yml
 #    (the role never rewrites it, so it survives playbook re-runs).
 #    Copy examples/vaultwarden.caddy.conf to
-#    /opt/zero-trust-vps/Caddyfile.d/vaultwarden.conf (substitute your suffix).
+#    /opt/vps-nook/Caddyfile.d/vaultwarden.conf (substitute your suffix).
 # 3. Start only the new service:
-#      cd /opt/zero-trust-vps && sudo docker compose up -d vaultwarden
+#      cd /opt/vps-nook && sudo docker compose up -d vaultwarden
 # 4. Re-run the public installer, or the remote ansible-playbook command, so
 #    Caddy validates and reloads the site. Do not restart Caddy directly.
 # 5. Open https://vw.<suffix> after importing root.crt (default: https://vw.internal).
@@ -27,7 +27,7 @@
 # Browsers work after importing root.crt. Mobile Bitwarden apps often reject
 # Caddy's private CA (no public OCSP/chain).
 #
-# Keep the service and its volumes under /opt/zero-trust-vps so the project
+# Keep the service and its volumes under /opt/vps-nook so the project
 # backup (scripts/backup.sh) captures it together with the base stack.
 services:
   vaultwarden:

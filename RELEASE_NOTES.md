@@ -1,9 +1,13 @@
-# v1.3.0 release notes
+# VPS Nook v2.0.0 (unreleased)
 
-This release makes installation and publication independently verifiable. The installer accepts the official repository and SSH-signed `v1.3.0` tag, resolves that tag to its exact commit, and runs Ansible from that detached commit.
+A shorter name and a guided terminal installation for your private VPS network.
 
-Release downloads contain the installer, its convenience checksum, an SPDX SBOM, the changelog, these notes, the upgrade guide, and `SHA256SUMS`. Every file has GitHub build-provenance attestation, and the published release is immutable.
+- Short setup wizard with visible defaults, inline validation and editable review.
+- Clear progress and first-client instructions, with optional release verification.
+- `NOOK_*` configuration and `/opt/vps-nook`, `/etc/vps-nook` paths.
+- SSH runtime-directory, socket activation, and authenticated recovery fixes.
+- Correct UTF-8 password length validation for AdGuard.
+- Unified pytest checks and weekly QEMU/lifecycle automation with private diagnostics.
 
-GitHub Actions stops after creating and byte-verifying a draft. The maintainer publishes it locally with existing `gh` authentication only after confirming that release immutability is enabled.
-
-Before upgrading an existing host, read `UPGRADE.md` and create an encrypted off-host backup.
+This is a breaking release. Automatic migration from v1 is not supported; see
+[UPGRADE.md](UPGRADE.md). Publication requires passing the documented release checks.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Synthetic health check for the zero-trust stack. Run on the VPS as root
+# Synthetic health check for the VPS Nook stack. Run on the VPS as root
 # (e.g. via cron/systemd.timer). Catches "running but broken" states that
 # restart policies miss: container health, internal HTTPS via Caddy, and
 # WireGuard handshake freshness.
@@ -8,11 +8,18 @@
 # tests/e2e/external-client-qemu.sh (manual) for that path.
 set -euo pipefail
 
+for legacy_name in "${!ZERO_TRUST_@}"; do
+    [[ -n ${legacy_name} ]] || continue
+    printf '[FAIL] %s is no longer accepted; use NOOK_%s (value not shown).\n' \
+        "${legacy_name}" "${legacy_name#ZERO_TRUST_}" >&2
+    exit 1
+done
+
 usage() {
     cat <<'EOF'
 Usage: synthetic-check.sh
 
-Run the live zero-trust stack health check on the VPS.
+Run the live VPS Nook stack health check on the VPS.
 EOF
 }
 

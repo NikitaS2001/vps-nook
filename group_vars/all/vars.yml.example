@@ -39,7 +39,7 @@ wg_easy_bootstrap_ui_port: 51821
 adguard_bootstrap_ui_port: 3000
 
 # Remote host paths
-project_root: "/opt/zero-trust-vps"
+project_root: "/opt/vps-nook"
 
 # Pinned upstream installer artifacts
 docker_apt_distribution: "{{ ansible_facts['distribution'] | lower }}"

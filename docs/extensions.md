@@ -4,7 +4,7 @@ Extensions use two existing primitives: a Compose override on the shared
 private network and a Caddy site fragment. The role owns the base stack and
 does not overwrite these two extension points.
 
-Create `/opt/zero-trust-vps/docker-compose.override.yml`:
+Create `/opt/vps-nook/docker-compose.override.yml`:
 
 ```yaml
 services:
@@ -17,7 +17,7 @@ services:
       - ./volumes/myservice:/data
 ```
 
-Create `/opt/zero-trust-vps/Caddyfile.d/myservice.conf`:
+Create `/opt/vps-nook/Caddyfile.d/myservice.conf`:
 
 ```caddyfile
 myservice.internal {
@@ -26,7 +26,7 @@ myservice.internal {
 }
 ```
 
-Keep service data below `/opt/zero-trust-vps/volumes` so the project backup
+Keep service data below `/opt/vps-nook/volumes` so the project backup
 captures it. Data outside the project root is outside the backup contract.
 
 Start the new service, then rerun the verified installer or remote playbook.
@@ -34,7 +34,7 @@ Ansible validates the complete Caddy candidate before reloading it; do not
 restart Caddy directly.
 
 ```bash
-cd /opt/zero-trust-vps
+cd /opt/vps-nook
 sudo docker compose up -d myservice
 ```
 

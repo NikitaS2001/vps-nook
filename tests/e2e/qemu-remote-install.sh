@@ -74,11 +74,6 @@ cleanup() {
         fi
         wait "${UFW_GUARD_PID}" >/dev/null 2>&1 || true
     fi
-    # remove the controller files written into the repo (all gitignored)
-    rm -f "${ROOT_DIR}/inventory/hosts.yml"
-    rm -f "${ROOT_DIR}/group_vars/all/vars.yml"
-    rm -f "${ROOT_DIR}/group_vars/all/vault_ssh.yml"
-    rm -f "${ROOT_DIR}/group_vars/all/vault_services.yml"
     if [[ -n "${QEMU_PID}" ]] && kill -0 "${QEMU_PID}" >/dev/null 2>&1; then
         kill "${QEMU_PID}" >/dev/null 2>&1 || true
         for _ in {1..10}; do
@@ -99,13 +94,28 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# Direct Bash invocations get the same isolation as the pytest adapter. Never
+# write or delete operator inventory/vaults in the source checkout.
+python3 - "${ROOT_DIR}" "${TMP_DIR}/controller" <<'PYSNAPSHOT'
+from pathlib import Path
+import sys
+source, destination = map(Path, sys.argv[1:])
+sys.path.insert(0, str(source))
+from tests.support import snapshot
+snapshot(source, destination)
+PYSNAPSHOT
+ROOT_DIR="${TMP_DIR}/controller"
+cd "${ROOT_DIR}"
 
 # --- test fixtures ----------------------------------------------------------
 ssh-keygen -q -t ed25519 -N "" -f "${TMP_DIR}/id_ed25519" -C "e2e-ztvps-remote"
 PUBKEY="$(cat "${TMP_DIR}/id_ed25519.pub")"
 ADGUARD_PASS="$(openssl rand -hex 12)"
 ADMIN_PASS="$(openssl rand -hex 12)"
-WG_PASS="${ZERO_TRUST_WG_PASSWORD:-Twelve\$COMPOSE_PROBE}"
+WG_PASS="${NOOK_WG_PASSWORD:-Twelve\$COMPOSE_PROBE}"
 ADMIN_HASH="$(openssl passwd -6 -stdin <<<"${ADMIN_PASS}")"
 ADGUARD_HASH="$(python3 - <<PY
 from passlib.hash import bcrypt
@@ -201,7 +211,7 @@ write_group_vars() {
     cat >"${ROOT_DIR}/group_vars/all/vars.yml" <<EOF
 ---
 # Network
-wg_traffic_mode: "${ZERO_TRUST_WG_TRAFFIC_MODE:-services}"
+wg_traffic_mode: "${NOOK_WG_TRAFFIC_MODE:-services}"
 ssh_port: ${configured_ssh_port}
 vps_hardening_controller_ssh_port: ${QEMU_ADMIN_PORT}
 wg_port: ${E2E_WG_PORT}
@@ -234,7 +244,7 @@ wg_easy_bootstrap_ui_port: 51821
 adguard_bootstrap_ui_port: 3000
 
 # Remote host paths
-project_root: "/opt/zero-trust-vps"
+project_root: "/opt/vps-nook"
 
 # Admin user
 admin_user: "sysadmin"
@@ -299,6 +309,7 @@ run_successful_cutover() {
 }
 
 run_rollback_probe() {
+    echo "[E2E] Running authenticated SSH rollback probe..."
     local playbook_log="${TMP_DIR}/rollback-ansible.log"
     local control_socket="${TMP_DIR}/rollback-control"
     local before_hash after_hash session_output
@@ -316,7 +327,7 @@ run_rollback_probe() {
         --tags packages,user,ufw,ssh; then
         fail "injected unreachable SSH cutover unexpectedly succeeded"
     fi
-    if ! grep -q 'SSH | Rescue | Fail after restoring previous sshd_config' \
+    if ! grep -q 'SSH | Rescue | Report failed cutover' \
         "${playbook_log}"; then
         sed -n '/SSH | Verify | Wait for sshd on new port/,$p' "${playbook_log}" >&2
         run_remote_over_control "root@127.0.0.1" "${QEMU_SSH_PORT}" \
@@ -369,6 +380,7 @@ run_tagged_cleanup() {
 }
 
 run_ufw_backend_probes() {
+    echo "[E2E] Exercising UFW backend failure..."
     local absent_log="${TMP_DIR}/ufw-absent.log"
     local failure_log="${TMP_DIR}/ufw-failure.log"
     local ready=false
@@ -483,13 +495,16 @@ elif [[ "${DO_SSH_ROLLBACK}" != "true" ]]; then
     record_authenticated_guest_host_key "127.0.0.1" "${QEMU_CLEANUP_PORT}"
     echo "[E2E] Running the complete playbook in remote mode..."
     if ! run_playbook "${TMP_DIR}/full-ansible.log" "${ROOT_DIR}/site.yml"; then
+        tail -n 80 "${TMP_DIR}/full-ansible.log" >&2
         fail "remote-mode playbook failed"
     fi
 fi
 
 if [[ "${DO_SSH_CUTOVER}" == "true" ]]; then
+    echo "[E2E] Running full playbook after SSH cutover..."
     write_cleanup_inventory
     if ! run_playbook "${TMP_DIR}/full-after-cutover.log" "${ROOT_DIR}/site.yml"; then
+        tail -n 80 "${TMP_DIR}/full-after-cutover.log" >&2
         fail "remote-mode playbook failed after authenticated SSH cutover"
     fi
 fi
@@ -498,7 +513,7 @@ if [[ "${DO_UFW_BACKEND_FAILURE}" == "true" ]]; then
     run_ufw_backend_probes
 fi
 
-if [[ "${DO_SSH_ROLLBACK}" != "true" && "${DO_UFW_BACKEND_FAILURE}" != "true" ]]; then
+if [[ ( "${DO_SSH_ROLLBACK}" != "true" || "${DO_SSH_CUTOVER}" == "true" ) && "${DO_UFW_BACKEND_FAILURE}" != "true" ]]; then
     echo "[E2E] Verifying the deployed stack on the hardened SSH port ${QEMU_ADMIN_PORT}"
     require_wrong_host_key_rejected "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" \
         "${TMP_DIR}/id_ed25519"

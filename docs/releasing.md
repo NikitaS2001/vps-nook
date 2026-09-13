@@ -70,3 +70,23 @@ manual recovery boundary.
 
 Do not edit an immutable release, move a release tag, upload extra assets, or
 publish directly from the workflow UI.
+
+## VPS Nook v2 publication checklist
+
+v2 is currently unreleased. Review validation evidence in the pull request,
+finish supported-platform E2E including SSH negative cases, and keep historical
+tags/assets untouched. Confirm the `NikitaS2001/vps-nook` workflow and attestation
+identity before creating the signed v2.0.0 tag.
+
+Before release, manually dispatch the Weekly workflow. For migration acceptance,
+run it twice consecutively against the same commit, including both supported
+operating systems and lifecycle/restore; there is no need to wait for the schedule.
+Weekly runs on Mondays at 02:17 UTC (Greenwich time).
+Verify the draft release assets and exercise the downloaded installer in a
+disposable VPS. Only then publish with the existing publisher.
+
+After publication, replace the quickstart preview fence with an executable Bash
+fence and the publication marker expected by `scripts/verify-ssot.sh`; remove the
+preparation notices from README and Getting started. Supply real HTTP status
+evidence via `VERIFY_SSOT_RELEASE_STATUS_FIXTURE` when checking executable release
+URLs. Never fabricate successful availability for an unpublished asset.

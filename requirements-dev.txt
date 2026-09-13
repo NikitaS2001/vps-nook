@@ -5,3 +5,4 @@ passlib==1.7.4
 pre-commit==4.3.0
 shellcheck-py==0.10.0.1
 yamllint==1.38.0
+pytest==9.1.1

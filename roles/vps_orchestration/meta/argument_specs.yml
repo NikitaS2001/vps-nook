@@ -5,7 +5,7 @@ argument_specs:
     options:
       project_root:
         type: path
-        default: /opt/zero-trust-vps
+        default: /opt/vps-nook
       wg_traffic_mode:
         type: str
         choices: [services, full]

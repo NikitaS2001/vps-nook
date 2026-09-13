@@ -28,20 +28,33 @@ cmp "${TMP_DIR}/expected" "${TMP_DIR}/actual" || {
     exit 1
 }
 
+# Later edits must not change either the deployed tree or its client checks.
+"${ROOT_DIR}/tests/e2e/qemu-install.sh" --self-test-source-snapshot "${TMP_DIR}" "${TMP_DIR}/snapshot"
+printf 'changed after snapshot\n' >"${TMP_DIR}/kept"
+[[ $(<"${TMP_DIR}/snapshot/kept") == kept && -f ${TMP_DIR}/snapshot/untracked && ! -e ${TMP_DIR}/snapshot/deleted ]] || {
+    printf 'qemu-source-contract: snapshot is not isolated from later working-tree changes\n' >&2
+    exit 1
+}
+# Literal source contracts, not shell expansion.
+# shellcheck disable=SC2016
+grep -Fq 'tar -C "${SOURCE_DIR}" -czf - .' "${ROOT_DIR}/tests/e2e/qemu-install.sh"
+# shellcheck disable=SC2016
+grep -Fq '< "${SOURCE_DIR}/tests/e2e/client-in-guest.sh"' "${ROOT_DIR}/tests/e2e/qemu-install.sh"
+
 fresh_env="$("${ROOT_DIR}/tests/e2e/qemu-install.sh" --self-test-installer-env fresh)"
 for credential in \
-    ZERO_TRUST_ADMIN_PASSWORD \
-    ZERO_TRUST_ADGUARD_PASSWORD \
-    ZERO_TRUST_WG_PASSWORD \
-    ZERO_TRUST_SSH_PUBKEY; do
+    NOOK_ADMIN_PASSWORD \
+    NOOK_ADGUARD_PASSWORD \
+    NOOK_WG_PASSWORD \
+    NOOK_SSH_PUBKEY; do
     [[ ${fresh_env} == *"${credential}="* ]] \
         || { printf 'qemu-source-contract: fresh install omitted %s\n' "${credential}" >&2; exit 1; }
 done
 bash -c "env ${fresh_env} sh -c '\
-    test \"\$ZERO_TRUST_ADMIN_PASSWORD\" = \"admin'\''secret\" && \
-    test \"\$ZERO_TRUST_ADGUARD_PASSWORD\" = \"adguard secret\" && \
-    test \"\$ZERO_TRUST_WG_PASSWORD\" = '\''wg\$secret'\'' && \
-    test \"\$ZERO_TRUST_SSH_PUBKEY\" = \"ssh-ed25519 AAAA fixture\"'" || {
+    test \"\$NOOK_ADMIN_PASSWORD\" = \"admin'\''secret\" && \
+    test \"\$NOOK_ADGUARD_PASSWORD\" = \"adguard secret\" && \
+    test \"\$NOOK_WG_PASSWORD\" = '\''wg\$secret'\'' && \
+    test \"\$NOOK_SSH_PUBKEY\" = \"ssh-ed25519 AAAA fixture\"'" || {
     printf 'qemu-source-contract: fresh credential environment did not round-trip\n' >&2
     exit 1
 }
@@ -54,22 +67,22 @@ existing_env="$("${ROOT_DIR}/tests/e2e/qemu-install.sh" --self-test-installer-en
     printf 'qemu-source-contract: retry paths are not explicitly existing-state reruns\n' >&2
     exit 1
 }
-grep -Fq "'sudo cat /opt/zero-trust-vps/.wg-traffic-mode'" \
+grep -Fq "'sudo cat /opt/vps-nook/.wg-traffic-mode'" \
     "${ROOT_DIR}/tests/e2e/common.sh" || {
     printf 'qemu-source-contract: traffic mode must be read with privilege\n' >&2
     exit 1
 }
-grep -Fq "sh -c 'cd /opt/zero-trust-vps-installer/repo" \
+grep -Fq "sh -c 'cd /opt/vps-nook-installer/repo" \
     "${ROOT_DIR}/tests/e2e/qemu-install.sh" || {
     printf 'qemu-source-contract: root-only installer checkout must be entered with privilege\n' >&2
     exit 1
 }
-grep -Fq -- '--extra-vars @/etc/zero-trust-vps/installer-vault.yml' \
+grep -Fq -- '--extra-vars @/etc/vps-nook/installer-vault.yml' \
     "${ROOT_DIR}/tests/e2e/qemu-install.sh" || {
     printf 'qemu-source-contract: direct playbook runs must load encrypted installer state\n' >&2
     exit 1
 }
-grep -Fq 'if ! sudo test -s /etc/zero-trust-vps/installer-vault.yml; then' \
+grep -Fq 'if ! sudo test -s /etc/vps-nook/installer-vault.yml; then' \
     "${ROOT_DIR}/tests/e2e/run-public-install.sh" || {
     printf 'qemu-source-contract: public VPS reruns must omit fresh credential inputs\n' >&2
     exit 1

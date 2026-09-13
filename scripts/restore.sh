@@ -3,11 +3,19 @@
 set -euo pipefail
 umask 077
 
+for legacy_name in "${!ZERO_TRUST_@}"; do
+    [[ -n ${legacy_name} ]] || continue
+    printf '[FAIL] %s is no longer accepted; use NOOK_%s (value not shown).\n' \
+        "${legacy_name}" "${legacy_name#ZERO_TRUST_}" >&2
+    exit 1
+done
+
+
 usage() {
     cat <<'EOF'
 Usage: restore.sh <backup.tar.gz|backup.tar.gz.age> [age-identity.txt]
 
-Validate and stage a zero-trust-vps backup, then activate it atomically. An
+Validate and stage a vps-nook backup, then activate it atomically. An
 age identity is required when the archive is encrypted.
 EOF
 }
@@ -18,9 +26,9 @@ if [[ ${1:-} == --help ]]; then
 fi
 [[ $# -ge 1 && $# -le 2 ]] || { usage >&2; exit 2; }
 
-PROJECT_ROOT="${ZERO_TRUST_PROJECT_ROOT:-/opt/zero-trust-vps}"
+PROJECT_ROOT="${NOOK_PROJECT_ROOT:-/opt/vps-nook}"
 BACKUP="$1"
-AGE_KEY="${2:-${ZERO_TRUST_AGE_KEY:-}}"
+AGE_KEY="${2:-${NOOK_AGE_KEY:-}}"
 PARENT_INPUT="$(dirname -- "${PROJECT_ROOT}")"
 BASE="$(basename -- "${PROJECT_ROOT}")"
 PARENT="$(realpath -e -- "${PARENT_INPUT}")" \
@@ -30,7 +38,7 @@ PARENT="$(realpath -e -- "${PARENT_INPUT}")" \
 command -v python3 >/dev/null || { echo "[FAIL] python3 is required" >&2; exit 1; }
 command -v flock >/dev/null || { echo "[FAIL] flock is required" >&2; exit 1; }
 
-exec {LOCK_FD}>"${PARENT}/.zero-trust-restore.lock"
+exec {LOCK_FD}>"${PARENT}/.nook-restore.lock"
 flock -n "${LOCK_FD}" || { echo "[FAIL] another restore is active" >&2; exit 1; }
 [[ ! -L "${PROJECT_ROOT}" ]] \
     || { echo "[FAIL] project root must not be a symlink" >&2; exit 1; }
@@ -45,14 +53,14 @@ else
     ROOT_ID_AT_START=
 fi
 
-STAGING="$(mktemp -d "${PARENT}/.zero-trust-restore.stage.XXXXXX")"
+STAGING="$(mktemp -d "${PARENT}/.nook-restore.stage.XXXXXX")"
 STAGING_ID="$(stat -c '%d:%i' -- "${STAGING}")"
-ROLLBACK="$(mktemp -d "${PARENT}/.zero-trust-restore.rollback.XXXXXX")"
-FAILED="$(mktemp -d "${PARENT}/.zero-trust-restore.failed.XXXXXX")"
+ROLLBACK="$(mktemp -d "${PARENT}/.nook-restore.rollback.XXXXXX")"
+FAILED="$(mktemp -d "${PARENT}/.nook-restore.failed.XXXXXX")"
 rmdir -- "${ROLLBACK}" "${FAILED}"
 ROLLBACK_ID=
 FAILED_ID=
-ARCHIVE_TMP="$(mktemp "${PARENT}/.zero-trust-restore.archive.XXXXXX")"
+ARCHIVE_TMP="$(mktemp "${PARENT}/.nook-restore.archive.XXXXXX")"
 chmod 0600 "${ARCHIVE_TMP}"
 
 parent_device="$(stat -c %d -- "${PARENT}")"
@@ -70,9 +78,9 @@ guarded_remove() {
     local path="$1" name expected_id
     name="$(basename -- "${path}")"
     case "${name}" in
-        .zero-trust-restore.stage.*) expected_id="${STAGING_ID}" ;;
-        .zero-trust-restore.rollback.*) expected_id="${ROLLBACK_ID}" ;;
-        .zero-trust-restore.failed.*) expected_id="${FAILED_ID}" ;;
+        .nook-restore.stage.*) expected_id="${STAGING_ID}" ;;
+        .nook-restore.rollback.*) expected_id="${ROLLBACK_ID}" ;;
+        .nook-restore.failed.*) expected_id="${FAILED_ID}" ;;
         *) return 1 ;;
     esac
     [[ ! -e ${path} && ! -L ${path} ]] && return 0
@@ -84,7 +92,7 @@ guarded_remove() {
 }
 
 rename_noreplace() {
-    local helper_timeout="${ZERO_TRUST_RENAME_TIMEOUT:-10}"
+    local helper_timeout="${NOOK_RENAME_TIMEOUT:-10}"
     [[ ${helper_timeout} =~ ^[1-9][0-9]*$ ]] \
         || { echo "[FAIL] rename helper timeout must be a positive integer" >&2; return 1; }
     timeout "${helper_timeout}" python3 - "${PARENT}" "$1" "$2" <<'PY'
@@ -329,8 +337,8 @@ compose_args() {
 }
 
 wait_for_readiness() {
-    local timeout_seconds="${ZERO_TRUST_RESTORE_READY_TIMEOUT:-120}"
-    local interval_seconds="${ZERO_TRUST_RESTORE_READY_INTERVAL:-2}"
+    local timeout_seconds="${NOOK_RESTORE_READY_TIMEOUT:-120}"
+    local interval_seconds="${NOOK_RESTORE_READY_INTERVAL:-2}"
     local expected running deadline
     [[ ${timeout_seconds} =~ ^[1-9][0-9]*$ ]] \
         || { echo "[FAIL] readiness timeout must be a positive integer" >&2; return 1; }

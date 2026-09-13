@@ -43,11 +43,11 @@ run_toolchain_contract() {
 }
 
 run_child_leak_sentinel() (
-    export ZERO_TRUST_NONINTERACTIVE=1
-    export ZERO_TRUST_ADMIN_PASSWORD='fixture-admin-value'
-    export ZERO_TRUST_ADGUARD_PASSWORD='fixture-adguard-value'
-    export ZERO_TRUST_WG_PASSWORD='fixture-wireguard-value'
-    export ZERO_TRUST_SSH_PUBKEY='ssh-ed25519 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA fixture'
+    export NOOK_NONINTERACTIVE=1
+    export NOOK_ADMIN_PASSWORD='fixture-admin-value'
+    export NOOK_ADGUARD_PASSWORD='fixture-adguard-value'
+    export NOOK_WG_PASSWORD='fixture-wireguard-value'
+    export NOOK_SSH_PUBKEY='ssh-ed25519 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA fixture'
     export INHERITED_ADMIN_PASSWORD='attacker-preexported-value'
     export INHERITED_ADGUARD_PASSWORD='attacker-preexported-value'
     export INHERITED_WG_PASSWORD='attacker-preexported-value'
@@ -64,15 +64,17 @@ run_child_leak_sentinel() (
         local child_output
         child_output="$(INSTALLER_CONTRACT_SENTINEL=visible env)"
         [[ "${child_output}" == *'INSTALLER_CONTRACT_SENTINEL=visible'* ]] || fail 'child environment probe did not detect its sentinel'
-        [[ "${child_output}" != *'ZERO_TRUST_ADMIN_PASSWORD='* ]] || fail 'admin secret name reached a child'
-        [[ "${child_output}" != *'ZERO_TRUST_ADGUARD_PASSWORD='* ]] || fail 'AdGuard secret name reached a child'
-        [[ "${child_output}" != *'ZERO_TRUST_WG_PASSWORD='* ]] || fail 'WireGuard secret name reached a child'
-        [[ "${child_output}" != *'ZERO_TRUST_SSH_PUBKEY='* ]] || fail 'SSH key name reached a child'
+        [[ "${child_output}" != *'NOOK_ADMIN_PASSWORD='* ]] || fail 'admin secret name reached a child'
+        [[ "${child_output}" != *'NOOK_ADGUARD_PASSWORD='* ]] || fail 'AdGuard secret name reached a child'
+        [[ "${child_output}" != *'NOOK_WG_PASSWORD='* ]] || fail 'WireGuard secret name reached a child'
+        [[ "${child_output}" != *'NOOK_SSH_PUBKEY='* ]] || fail 'SSH key name reached a child'
         [[ "${child_output}" != *'fixture-admin-value'* ]] || fail 'admin fixture value reached a child'
         [[ "${child_output}" != *'fixture-adguard-value'* ]] || fail 'AdGuard fixture value reached a child'
         [[ "${child_output}" != *'fixture-wireguard-value'* ]] || fail 'WireGuard fixture value reached a child'
         [[ "${child_output}" != *'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'* ]] || fail 'SSH key fixture value reached a child'
     }
+    reject_legacy_inputs() { :; }
+    require_tun() { :; }
     require_root() { :; }
     require_supported_os() { :; }
     validate_release_source() { assert_clean_child_environment; }
@@ -89,6 +91,7 @@ run_child_leak_sentinel() (
 )
 
 run_existing_state_main() (
+    export NOOK_NONINTERACTIVE=1
     local fixture_dir
     fixture_dir="$(command mktemp -d)"
     trap 'rm -rf "${fixture_dir}"' EXIT
@@ -103,6 +106,8 @@ run_existing_state_main() (
     VAULT_FILE="${fixture_dir}/installer-vault.yml"
 
     validate_release_source() { :; }
+    reject_legacy_inputs() { :; }
+    require_tun() { :; }
     require_root() { :; }
     require_supported_os() { :; }
     require_supported_platform() { :; }
@@ -129,20 +134,22 @@ run_suffix_summary() (
     local suffix="$1"
     local expected_suffix="$2"
 
-    export ZERO_TRUST_NONINTERACTIVE=1
-    export ZERO_TRUST_ADMIN_PASSWORD='fixture-admin-value'
-    export ZERO_TRUST_ADGUARD_PASSWORD='fixture-adguard-value'
-    export ZERO_TRUST_WG_PASSWORD='fixture-wireguard-value'
-    export ZERO_TRUST_SSH_PUBKEY='ssh-ed25519 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA fixture'
-    export ZERO_TRUST_SSH_PORT=2222
-    export ZERO_TRUST_WG_PORT=51820
-    export ZERO_TRUST_ADMIN_USER=sysadmin
-    export ZERO_TRUST_WG_HOST=192.0.2.10
-    export ZERO_TRUST_INTERNAL_DOMAIN_SUFFIX="${suffix}"
+    export NOOK_NONINTERACTIVE=1
+    export NOOK_ADMIN_PASSWORD='fixture-admin-value'
+    export NOOK_ADGUARD_PASSWORD='fixture-adguard-value'
+    export NOOK_WG_PASSWORD='fixture-wireguard-value'
+    export NOOK_SSH_PUBKEY='ssh-ed25519 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA fixture'
+    export NOOK_SSH_PORT=2222
+    export NOOK_WG_PORT=51820
+    export NOOK_ADMIN_USER=sysadmin
+    export NOOK_WG_HOST=192.0.2.10
+    export NOOK_INTERNAL_DOMAIN_SUFFIX="${suffix}"
 
     # shellcheck source=../../install.sh
     source "${ROOT_DIR}/install.sh"
 
+    reject_legacy_inputs() { :; }
+    require_tun() { :; }
     require_root() { :; }
     require_supported_os() { :; }
     validate_release_source() { :; }
@@ -151,6 +158,7 @@ run_suffix_summary() (
     checkout_release() { :; }
     install_collections() { :; }
     run_ansible_pull() {
+        resolve_effective_installer_inputs
         unset ADMIN_PASSWORD ADGUARD_PASSWORD WG_PASSWORD SSH_PUBKEY
         unset INHERITED_ADMIN_PASSWORD INHERITED_ADGUARD_PASSWORD INHERITED_WG_PASSWORD INHERITED_SSH_PUBKEY
     }
@@ -159,7 +167,10 @@ run_suffix_summary() (
             wg_easy_bootstrap_ui_port) printf '%s\n' '51821' ;;
             adguard_bootstrap_ui_port) printf '%s\n' '3000' ;;
             internal_domain_suffix) printf '%s\n' 'internal' ;;
-            *) printf '%s\n' 'unused' ;;
+            ssh_port) printf '2222\n' ;;
+            wg_port) printf '51820\n' ;;
+            admin_user) printf 'sysadmin\n' ;;
+            *) fail 'unexpected default requested' ;;
         esac
     }
 
@@ -205,16 +216,18 @@ run_env_clean() (
     fixture_dir="$(command mktemp -d)"
     trap 'rm -rf "${fixture_dir}"' EXIT
 
-    export ZERO_TRUST_NONINTERACTIVE=1
-    export ZERO_TRUST_ADMIN_PASSWORD='fixture-admin-value'
-    export ZERO_TRUST_ADGUARD_PASSWORD='fixture-adguard-value'
-    export ZERO_TRUST_WG_PASSWORD='fixture-wireguard-value'
-    export ZERO_TRUST_SSH_PUBKEY='ssh-ed25519 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA fixture'
-    export ZERO_TRUST_WG_HOST=192.0.2.10
+    export NOOK_NONINTERACTIVE=1
+    export NOOK_ADMIN_PASSWORD='fixture-admin-value'
+    export NOOK_ADGUARD_PASSWORD='fixture-adguard-value'
+    export NOOK_WG_PASSWORD='fixture-wireguard-value'
+    export NOOK_SSH_PUBKEY='ssh-ed25519 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA fixture'
+    export NOOK_WG_HOST=192.0.2.10
 
     # shellcheck source=../../install.sh
     source "${ROOT_DIR}/install.sh"
 
+    reject_legacy_inputs() { :; }
+    require_tun() { :; }
     require_root() { :; }
     require_supported_os() { :; }
     validate_release_source() { :; }
@@ -412,7 +425,7 @@ init_source_policy_fixture() {
     SOURCE_FIXTURE_INSTALL_ROOT="${SOURCE_FIXTURE_DIR}/install-root"
     SOURCE_FIXTURE_INSTALLER="${SOURCE_FIXTURE_DIR}/install.sh"
     SOURCE_FIXTURE_KEY="${SOURCE_FIXTURE_DIR}/signing-key"
-    SOURCE_FIXTURE_TAG='v1.3.2'
+    SOURCE_FIXTURE_TAG='v2.0.0'
 
     git init --quiet "${SOURCE_FIXTURE_REPO}"
     git -C "${SOURCE_FIXTURE_REPO}" config user.name 'Release Fixture'
@@ -446,10 +459,10 @@ prepare_production_checkout() {
     mkdir -p "${SOURCE_FIXTURE_INSTALL_ROOT}"
     git clone --quiet "${SOURCE_FIXTURE_REPO}" "${SOURCE_FIXTURE_INSTALL_ROOT}/repo"
     git -C "${SOURCE_FIXTURE_INSTALL_ROOT}/repo" remote set-url origin \
-        'https://github.com/NikitaS2001/ansible-zero-trust-vps.git'
+        'https://github.com/NikitaS2001/vps-nook.git'
     git -C "${SOURCE_FIXTURE_INSTALL_ROOT}/repo" config \
         "url.file://${SOURCE_FIXTURE_REPO}.insteadOf" \
-        'https://github.com/NikitaS2001/ansible-zero-trust-vps.git'
+        'https://github.com/NikitaS2001/vps-nook.git'
 }
 
 run_source_checkout() {
@@ -458,9 +471,9 @@ run_source_checkout() {
     local release_ref="$3"
     local move_tag="${4:-false}"
 
-    ZERO_TRUST_DEV_MODE="${mode}" \
-    ZERO_TRUST_REPO_URL="${repository_url}" \
-    ZERO_TRUST_RELEASE_REF="${release_ref}" \
+    NOOK_DEV_MODE="${mode}" \
+    NOOK_REPO_URL="${repository_url}" \
+    NOOK_RELEASE_REF="${release_ref}" \
     SOURCE_FIXTURE_KEY="${SOURCE_FIXTURE_KEY}" \
     SOURCE_FIXTURE_MOVE_TAG="${move_tag}" \
     SOURCE_FIXTURE_REPO="${SOURCE_FIXTURE_REPO}" \
@@ -469,7 +482,7 @@ run_source_checkout() {
         eval "$(declare -f release_git | sed "1s/release_git/installer_release_git/")"
         release_git() {
             installer_release_git \
-                -c "url.file://${SOURCE_FIXTURE_REPO}.insteadOf=https://github.com/NikitaS2001/ansible-zero-trust-vps.git" "$@"
+                -c "url.file://${SOURCE_FIXTURE_REPO}.insteadOf=https://github.com/NikitaS2001/vps-nook.git" "$@"
         }
         prepare_allowed_signers_file() {
             ensure_install_root
@@ -552,7 +565,7 @@ run_replacement_object_isolation() (
         "${SOURCE_FIXTURE_FIRST_SHA}" "${SOURCE_FIXTURE_SECOND_SHA}"
 
     output="$(SOURCE_FIXTURE_SECOND_SHA="${SOURCE_FIXTURE_SECOND_SHA}" run_source_checkout '' \
-        'https://github.com/NikitaS2001/ansible-zero-trust-vps.git' "${SOURCE_FIXTURE_TAG}" 2>&1)" \
+        'https://github.com/NikitaS2001/vps-nook.git' "${SOURCE_FIXTURE_TAG}" 2>&1)" \
         || fail "replacement-object fixture rejected the official source: ${output}"
     [[ "${output}" == *"BOUND_SHA=${SOURCE_FIXTURE_FIRST_SHA} HEAD=${SOURCE_FIXTURE_FIRST_SHA} PULL_SHA=${SOURCE_FIXTURE_FIRST_SHA} CONTENT=first PULL_NO_REPLACE=1 PULL_HOOKS_PATH=/dev/null"* ]] \
         || fail "replacement object split trusted SHA from materialized or ansible-pull content: ${output}"
@@ -572,7 +585,7 @@ run_checkout_hook_isolation() (
     git -C "${SOURCE_FIXTURE_INSTALL_ROOT}/repo" config core.hooksPath "${SOURCE_FIXTURE_DIR}/hooks"
 
     output="$(SOURCE_FIXTURE_SECOND_SHA="${SOURCE_FIXTURE_SECOND_SHA}" run_source_checkout '' \
-        'https://github.com/NikitaS2001/ansible-zero-trust-vps.git' "${SOURCE_FIXTURE_TAG}" 2>&1)" \
+        'https://github.com/NikitaS2001/vps-nook.git' "${SOURCE_FIXTURE_TAG}" 2>&1)" \
         || fail "checkout-hook fixture rejected the official source: ${output}"
     [[ "${output}" == *"BOUND_SHA=${SOURCE_FIXTURE_FIRST_SHA} HEAD=${SOURCE_FIXTURE_FIRST_SHA} PULL_SHA=${SOURCE_FIXTURE_FIRST_SHA} CONTENT=first PULL_NO_REPLACE=1 PULL_HOOKS_PATH=/dev/null"* ]] \
         || fail "checkout hook changed verified materialized content: ${output}"
@@ -594,7 +607,7 @@ run_local_git_config_isolation() (
     config_mode="$(stat -c '%a' "${SOURCE_FIXTURE_INSTALL_ROOT}/repo/.git/config")"
 
     output="$(SOURCE_FIXTURE_SECOND_SHA="${SOURCE_FIXTURE_SECOND_SHA}" run_source_checkout '' \
-        'https://github.com/NikitaS2001/ansible-zero-trust-vps.git' "${SOURCE_FIXTURE_TAG}" 2>&1)" \
+        'https://github.com/NikitaS2001/vps-nook.git' "${SOURCE_FIXTURE_TAG}" 2>&1)" \
         || fail "repository-local Git config fixture rejected the official source: ${output}"
     [[ ! -e "${SOURCE_FIXTURE_DIR}/local-config-command-ran" ]] \
         || fail 'repository-local core.fsmonitor executed during checkout or ansible-pull'
@@ -641,7 +654,7 @@ run_ansible_pull_git_config_isolation() (
     hostile_config="${SOURCE_FIXTURE_DIR}/hostile-gitconfig"
     git config --file "${hostile_config}" installer.hostile visible
     git config --file "${hostile_config}" url.https://attacker.example/.insteadOf \
-        'https://github.com/NikitaS2001/ansible-zero-trust-vps.git'
+        'https://github.com/NikitaS2001/vps-nook.git'
     export GIT_CONFIG_GLOBAL="${hostile_config}"
     export GIT_CONFIG_NOSYSTEM=0
     export GIT_CONFIG_COUNT=1
@@ -649,7 +662,7 @@ run_ansible_pull_git_config_isolation() (
     export GIT_CONFIG_VALUE_0=visible
 
     output="$(SOURCE_FIXTURE_SECOND_SHA="${SOURCE_FIXTURE_SECOND_SHA}" run_source_checkout '' \
-        'https://github.com/NikitaS2001/ansible-zero-trust-vps.git' "${SOURCE_FIXTURE_TAG}" 2>&1)" \
+        'https://github.com/NikitaS2001/vps-nook.git' "${SOURCE_FIXTURE_TAG}" 2>&1)" \
         || fail "ansible-pull Git isolation fixture rejected the official source: ${output}"
     [[ "${output}" == *'PULL_CONFIG_GLOBAL=/dev/null PULL_CONFIG_NOSYSTEM=1 PULL_CONFIG_COUNT=1 PULL_CONFIG_KEY_0=core.hooksPath PULL_CONFIG_VALUE_0=/dev/null PULL_CONFIG=unset PULL_CONFIG_PARAMETERS=unset PULL_HOSTILE_CONFIG=absent PULL_URL_REWRITE=absent'* ]] \
         || fail "ansible-pull inherited hostile Git configuration: ${output}"
@@ -669,7 +682,7 @@ run_inherited_git_config_isolation() (
     chmod +x "${SOURCE_FIXTURE_DIR}/hooks/post-checkout"
     hostile_config="${SOURCE_FIXTURE_DIR}/inherited-gitconfig"
     git config --file "${hostile_config}" remote.origin.url \
-        'https://github.com/NikitaS2001/ansible-zero-trust-vps.git'
+        'https://github.com/NikitaS2001/vps-nook.git'
     git config --file "${hostile_config}" remote.origin.fetch \
         '+refs/heads/*:refs/remotes/origin/*'
     git config --file "${hostile_config}" core.hooksPath "${SOURCE_FIXTURE_DIR}/hooks"
@@ -679,7 +692,7 @@ run_inherited_git_config_isolation() (
     export GIT_CONFIG_PARAMETERS="'installer.parameter'='visible'"
 
     output="$(SOURCE_FIXTURE_SECOND_SHA="${SOURCE_FIXTURE_SECOND_SHA}" run_source_checkout '' \
-        'https://github.com/NikitaS2001/ansible-zero-trust-vps.git' "${SOURCE_FIXTURE_TAG}" 2>&1)" \
+        'https://github.com/NikitaS2001/vps-nook.git' "${SOURCE_FIXTURE_TAG}" 2>&1)" \
         || fail "inherited Git config fixture rejected the official source: ${output}"
     [[ ! -e "${SOURCE_FIXTURE_DIR}/inherited-hook-ran" ]] \
         || fail 'inherited GIT_CONFIG ran a hostile post-checkout hook'
@@ -697,7 +710,7 @@ run_source_policy() (
     trap cleanup_source_policy_fixture EXIT
     prepare_production_checkout
     output="$(SOURCE_FIXTURE_SECOND_SHA="${SOURCE_FIXTURE_SECOND_SHA}" run_source_checkout '' \
-        'https://github.com/NikitaS2001/ansible-zero-trust-vps.git' "${SOURCE_FIXTURE_TAG}" 2>&1)" \
+        'https://github.com/NikitaS2001/vps-nook.git' "${SOURCE_FIXTURE_TAG}" 2>&1)" \
         || fail "production source policy rejected the official source: ${output}"
     [[ "${output}" == *"BOUND_SHA=${SOURCE_FIXTURE_FIRST_SHA} HEAD=${SOURCE_FIXTURE_FIRST_SHA} PULL_SHA=${SOURCE_FIXTURE_FIRST_SHA}"* ]] \
         || fail "production did not bind checkout and ansible-pull to one SHA: ${output}"
@@ -736,7 +749,7 @@ run_source_policy_rejections() (
     trap cleanup_source_policy_fixture EXIT
     assert_source_policy_rejected alternate-url '' "${SOURCE_FIXTURE_REPO}" "${SOURCE_FIXTURE_TAG}"
     assert_source_policy_rejected alternate-ref '' \
-        'https://github.com/NikitaS2001/ansible-zero-trust-vps.git' main
+        'https://github.com/NikitaS2001/vps-nook.git' main
     assert_source_policy_rejected invalid-dev-zero 0 "${SOURCE_FIXTURE_REPO}" main
     assert_source_policy_rejected invalid-dev-true true "${SOURCE_FIXTURE_REPO}" main
     assert_source_policy_rejected unsafe-ref 1 "${SOURCE_FIXTURE_REPO}" '../main'
@@ -746,7 +759,7 @@ run_source_policy_rejections() (
     printf 'preserve me\n' >"${SOURCE_FIXTURE_INSTALL_ROOT}/repo/unrelated.txt"
     before_head="$(git -C "${SOURCE_FIXTURE_INSTALL_ROOT}/repo" rev-parse HEAD)"
     if output="$(SOURCE_FIXTURE_SECOND_SHA="${SOURCE_FIXTURE_SECOND_SHA}" run_source_checkout '' \
-        'https://github.com/NikitaS2001/ansible-zero-trust-vps.git' "${SOURCE_FIXTURE_TAG}" 2>&1)"; then
+        'https://github.com/NikitaS2001/vps-nook.git' "${SOURCE_FIXTURE_TAG}" 2>&1)"; then
         fail "mismatched origin was accepted: ${output}"
     fi
     [[ "$(git -C "${SOURCE_FIXTURE_INSTALL_ROOT}/repo" rev-parse HEAD)" == "${before_head}" ]] \
@@ -758,7 +771,7 @@ run_source_policy_rejections() (
     rm -rf "${SOURCE_FIXTURE_INSTALL_ROOT}"
     prepare_production_checkout
     output="$(SOURCE_FIXTURE_SECOND_SHA="${SOURCE_FIXTURE_SECOND_SHA}" run_source_checkout '' \
-        'https://github.com/NikitaS2001/ansible-zero-trust-vps.git' "${SOURCE_FIXTURE_TAG}" true 2>&1)" \
+        'https://github.com/NikitaS2001/vps-nook.git' "${SOURCE_FIXTURE_TAG}" true 2>&1)" \
         || fail "post-verification tag move broke immutable execution: ${output}"
     [[ "${output}" == *"BOUND_SHA=${SOURCE_FIXTURE_FIRST_SHA} HEAD=${SOURCE_FIXTURE_FIRST_SHA} PULL_SHA=${SOURCE_FIXTURE_FIRST_SHA}"* ]] \
         || fail "post-verification tag move changed executed SHA: ${output}"

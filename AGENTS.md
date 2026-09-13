@@ -2,133 +2,95 @@
 
 ## Project Overview
 
-Ansible project that provisions a self-hosted zero-trust VPS: hardened SSH/UFW/fail2ban plus Docker services for WireGuard (`wg-easy`), AdGuard DNS, and Caddy internal TLS. It supports two operational paths:
+VPS Nook provisions one hardened VPS with Ansible: key-only SSH, UFW, fail2ban, and a private Docker stack of WireGuard (`wg-easy`), AdGuard Home, and Caddy internal TLS. Only SSH and WireGuard UDP are public; administration UIs stay localhost/private-network only.
 
-- `site.yml` for an administrator-managed remote deployment.
-- `install.sh` for a pinned, noninteractive-friendly fresh Debian/Ubuntu VPS install using `ansible-pull`.
-
-Treat this as security-sensitive infrastructure. Preserve secret handling, SSH cutover rollback, firewall ordering, and service bootstrap state.
+Both remote controller-managed Ansible and the signed-release `install.sh` installer use `site.yml`. Treat changes as security-sensitive infrastructure work. Do not mix controller-managed configuration with installer state.
 
 ## Architecture & Data Flow
 
-`site.yml` is the source-of-truth entry point. It runs two privileged `vps` plays, in order:
+`site.yml` runs two privileged, fact-gathering plays on inventory group `vps`, in order:
 
-1. `roles/vps_hardening` (`hardening` tag): validates host capabilities, installs base packages, creates the admin user, sets sysctls, configures UFW, cuts SSH over to the new port, then configures fail2ban.
-2. `roles/vps_orchestration` (`orchestration` tag): validates network/domain inputs, installs Docker, creates persistent volume paths, renders AdGuard and Compose configuration, deploys/reloads Caddy and Compose services, applies Docker/UFW rules, then verifies service reachability.
+1. `vps_hardening` (`hardening` tag): platform preflight → packages → administrator → sysctls → UFW → SSH cutover → fail2ban.
+2. `vps_orchestration` (`orchestration` tag): vault/network preflight → netfilter → Docker → volumes → AdGuard → Compose/Caddy/bootstrap → traffic-policy reconciliation → Docker/UFW integration → runtime verification.
 
-Role task entry points dynamically include phase files. Keep new work in the owning phase rather than growing `tasks/main.yml`. Configuration is rendered from role defaults and `group_vars/all`, then applied through Ansible modules and handlers. Orchestration templates produce Docker Compose, Caddy, and AdGuard configuration; verification fetches the generated Caddy root CA and tests service/container invariants.
+Role defaults and `group_vars/all` supply inputs; argument specifications and task assertions enforce contracts. Jinja templates render configuration, registered facts carry observed state, and handlers apply deferred changes. Keep changes in the owning phase file; each role's `tasks/main.yml` controls ordering and include/tag boundaries.
 
-Security-sensitive flows are deliberately fail-closed:
+The services share dual-stack `vpn_net`. AdGuard resolves internal names to Caddy, which terminates internal TLS and proxies the UIs. Verification fetches the public CA to `fetched_certs/<inventory-host>/root.crt`. Service state defaults to `/opt/vps-nook`; encrypted installer inputs live under `/etc/vps-nook`, separately from its checkout and virtualenv under `/opt/vps-nook-installer`.
 
-- SSH changes validate candidate configuration, flush handlers, wait for the new port, and rescue/restore on failure.
-- UFW permits current/new SSH and WireGuard before default-deny/cutover actions.
-- Caddy candidates are validated before activation; Compose bootstrap secrets are removed after initialization.
-- Preflight probes use explicit assertions after non-mutating checks; do not hide a failed prerequisite with permissive `failed_when` logic.
+`wg_traffic_mode: services` restricts destinations on the server, not merely through client AllowedIPs. `full` requires IPv4 egress; IPv6 default routing requires a successful egress probe. Mode changes reconcile persisted markers, wg-easy SQLite policy, and live firewall rules; clients need refreshed profiles.
+
+Preserve these transaction boundaries:
+
+- **SSH/UFW:** allow current/new SSH and WireGuard before default-deny. Validate the SSH candidate, preserve service/socket rollback, flush handlers, and authenticate the new connection before removing old-port access.
+- **Caddy:** validate the candidate together with operator extensions before activation. Preserve the bind-mounted file inode, reload, and restore on failure; do not substitute an atomic rename or generic template restart.
+- **Bootstrap/policy:** wg-easy SQLite determines initialization state. Scrub Compose `INIT_*` credentials after bootstrap and on failure. Preserve policy snapshots, schema checks, rollback, and fail-closed handling of interrupted transactions. Docker bypasses ordinary UFW rules: retain the subsequent `ufw-docker` reconciliation.
+- **Secrets/state:** retain `no_log: true`, restrictive permissions, and path/symlink guards. Never recreate volumes or discard malformed vault/policy state to make a rerun succeed.
 
 ## Key Directories
 
-- `roles/vps_hardening/` — OS, user, SSH, UFW, sysctl, and fail2ban hardening role.
-- `roles/vps_orchestration/` — Docker stack, persistent state, Caddy/AdGuard/WireGuard configuration, and runtime checks.
-- `roles/*/tasks/` — phase-oriented task files; `tasks/main.yml` owns include order and tag boundaries.
-- `roles/*/defaults/` — role configuration defaults. Keep deployment-specific secrets out of these files.
-- `roles/*/templates/` — Jinja2 configuration templates, including `docker-compose.yml.j2`, `Caddyfile.j2`, and `AdGuardHome.yaml.j2`.
-- `group_vars/all/` — operator variables and encrypted-vault examples. Copy `*.example` files; never commit real `vars.yml`, vault files, inventory, or fetched certificates.
-- `inventory/` — `hosts.yml.example` for remote hosts; `localhost.yml` for controlled local/smoke scenarios.
-- `scripts/` — contributor setup/check, operational backup, restore, synthetic-check, release-contract, and source-of-truth validation scripts.
-- `tests/validation/` — deterministic Bash/Ansible fixture contracts; `manifest.txt` enumerates the contracts run by `scripts/check.sh`.
-- `tests/e2e/` — QEMU/KVM and remote-install scenarios; not part of routine CI.
-- `.github/workflows/ci.yml` — CI workflow; its static job runs the contributor bootstrap and quick-check entrypoints.
-- `.github/workflows/release.yml` — tagged-release workflow; release validation is also available locally through `scripts/check.sh --release`.
+- `roles/vps_hardening/`, `roles/vps_orchestration/` — implementation and public input references; tasks, templates, handlers, defaults, and argument specifications evolve together.
+- `group_vars/all/`, `inventory/` — tracked examples and ignored operator configuration. `inventory/localhost.yml` supports installer/local execution.
+- `tests/installer/`, `tests/contracts/`, `tests/runner/` — native Python tests and adapters; `tests/validation/` retains Bash contracts; `tests/e2e/` owns VM/remote harnesses.
+- `scripts/` — contributor gates, live operations, release tooling. `docs/` and role READMEs own detailed procedures and input references.
+- `examples/` — optional private Compose/Caddy extensions; `.github/workflows/` — CI, weekly lifecycle, and release workflows.
 
 ## Development Commands
 
-Set up the pinned controller dependencies and collections, then run the same fast checks as CI:
+No compilation step. Bootstrap the pinned Python/Ansible toolchain first:
 
 ```bash
-scripts/bootstrap.sh
-scripts/check.sh
+scripts/bootstrap.sh                 # create .venv; install tools and collections
+scripts/check.sh                     # quick tools, native fixtures, Bash contracts
+scripts/check.sh --e2e               # quick, then services-mode QEMU scenarios
+scripts/check.sh --release           # quick, QEMU, lifecycle, remaining release contracts
+source .venv/bin/activate            # required for direct tool commands below
+pytest -k installer                 # focused installer cases within quick
+pytest --collect-only               # list all cases without deployment preparation
+ansible-lint --strict
+yamllint .
+pre-commit run gitleaks --all-files
 ```
 
-Prepare an encrypted remote deployment from examples:
+`check.sh` finds `.venv/bin` automatically and stops at the first failed gate. It includes syntax, lint, secret scanning, and SSOT checks; use it for canonical shell-file selection and validation wiring.
 
-```bash
-cp inventory/hosts.yml.example inventory/hosts.yml
-cp group_vars/all/vars.yml.example group_vars/all/vars.yml
-cp group_vars/all/vault_services.yml.example group_vars/all/vault_services.yml
-cp group_vars/all/vault_ssh.yml.example group_vars/all/vault_ssh.yml
-ansible-vault encrypt group_vars/all/vault_services.yml group_vars/all/vault_ssh.yml
-ansible-playbook --ask-vault-pass --syntax-check site.yml
-ansible-playbook --ask-vault-pass site.yml -u root
-```
-
-Use targeted tags only when the phase boundary is intentional, for example:
-
-```bash
-ansible-playbook --ask-vault-pass site.yml --tags hardening -u root
-ansible-playbook --ask-vault-pass site.yml --tags orchestration -u root
-```
-
-Do not rely on Ansible check mode for these roles: provisioning contains validation, stateful Docker bootstrap, service reloads, and SSH/UFW cutover logic that check mode cannot faithfully model.
-
-Use `scripts/check.sh --e2e` for the fast checks plus the supported-platform QEMU install test. Use `scripts/check.sh --release` for the fast checks, QEMU install and lifecycle coverage, and release contracts.
-
-For a focused validation, run the contract that covers the changed behavior directly. For example:
-
-```bash
-bash scripts/verify-ssot.sh
-bash tests/validation/workflow-contract.sh
-```
+For actual deployment, follow [Getting started](docs/getting-started.md#remote-ansible-deployment): prepare inventory and encrypted vaults before `ansible-playbook --ask-vault-pass site.yml`. Use `--tags hardening` or `--tags orchestration` only for an intentional phase boundary. Check mode cannot prove bootstrap, reloads, or SSH/firewall transactions. Run installers only on disposable development VPSs; `bash install.sh --help` is non-provisioning.
 
 ## Code Conventions & Common Patterns
 
-- Use YAML document starts and the repository’s `.yamllint` rules. Keep lines at or below 140 characters where practical; explicit octal notation is prohibited.
-- Name tasks as `Area | Phase | Action`. Keep tags on both include boundaries and task-level operations when a phase must be independently runnable.
-- Use descriptive role-prefixed registered facts, such as `vps_hardening_*` and `vps_orchestration_*`.
-- Prefer idempotent Ansible modules and declarative `state`. For necessary shell/command probes, define precise `changed_when` and `failed_when`, then assert expected output explicitly.
-- Render secrets with restrictive modes and `no_log: true`; do not expose vault values, initial passwords, tokens, private keys, or generated extra-vars in task names, debug output, fixtures, or logs.
-- Preserve `validate`, backup, rescue, handler, and `meta: flush_handlers` sequencing around SSH, UFW, Caddy, and Compose changes. These are safety mechanisms, not incidental complexity.
-- Keep mutable service state in the existing volume/project-root paths. Avoid destructive volume recreation or direct service restarts that bypass the role’s validation/reload path.
-- Reuse role defaults, `group_vars`, templates, and handlers rather than adding a parallel configuration source. Do not alter derived Docker architecture/repository/path variables without tracing their consumers.
-- Ansible is the dependency-injection/state-management mechanism here: variables feed roles/templates, registered facts carry local state, and handlers apply deferred changes. There is no application framework or JavaScript package layer.
+- YAML starts with `---`; `.yamllint` sets a 140-character warning limit and forbids octal literals. Quote permissions, e.g. `mode: '0600'`.
+- Name tasks `Area | Phase | Action`, use fully qualified Ansible modules, and prefer role-prefixed facts/registers (`vps_hardening_*`, `vps_orchestration_*`). Preserve tags across dynamic includes.
+- Prefer declarative, idempotent modules. Probes need accurate `changed_when`/`failed_when` and explicit outcome assertions. Optional probes must feed an explicit policy decision, not silently weaken prerequisites.
+- Variables, registered facts, and handlers are the dependency-injection/state-management pattern. Reuse existing transactions and `block`/`rescue` error handling rather than adding parallel activation paths.
+- Bash uses strict mode, quoted expansions, command arrays, private temporary files, and trap-based cleanup/rollback. Preserve failure propagation; never trace credentials.
+- Credentials belong in whole-file encrypted vaults; the services vault must be a regular non-symlink file with mode `0600`. Ordinary variables reference `vault_*` values. Plaintext `admin_password` and `wg_easy_admin_password` are rejected; never log secrets, hashes, or generated extra-vars.
+- Public input changes require matching defaults, argument specs, examples, role references, and contracts. Keep image digests, upstream checksums, Python/collection pins, and GitHub Action SHA pins consistent.
 
 ## Important Files
 
-- `site.yml` — deployment entry point and role order.
-- `ansible.cfg` — default `inventory/hosts.yml`, `roles_path=roles`, host-key checking, YAML output, SSH pipelining.
-- `requirements.yml` — exact collection pins: `community.docker`, `community.general`, `ansible.posix`.
-- `install.sh` — public installer contract, environment input validation, pinned checkout, temporary-secret cleanup, and local `ansible-pull` invocation.
-- `README.md` — supported installation, remote deployment, operations, and development workflows.
-- `.ansible-lint`, `.yamllint`, `.pre-commit-config.yaml` — formatting/lint/QA policy.
-- `scripts/verify-ssot.sh` — source-of-truth cross-check; update its contracts when changing files or commands it validates.
-- `scripts/bootstrap.sh`, `scripts/check.sh` — canonical contributor setup and validation entrypoints; `scripts/check.sh --release` adds release validation.
-- `tests/validation/manifest.txt` — validation contracts executed by `scripts/check.sh`.
+- `site.yml`, `ansible.cfg` — entrypoint and controller defaults: remote inventory, strict host-key checking, YAML output, SSH pipelining.
+- `roles/vps_hardening/meta/main.yml`, `roles/vps_orchestration/meta/argument_specs.yml` — public input contracts; role preflight assertions add invariants.
+- `roles/vps_hardening/tasks/ssh.yml` — SSH cutover/rescue. Under `roles/vps_orchestration/tasks/`, `caddy_transaction.yml`, `compose_prepare.yml`, `compose_lifecycle.yml`, `traffic_mode.yml`, and `ufw_docker.yml` own stateful safety boundaries.
+- `install.sh` — pinned signer, annotated-tag verification, exact-SHA `ansible-pull`, authoritative encrypted rerun state, secret cleanup. `UPGRADE.md` rejects v1 in-place upgrade/restore and legacy `ZERO_TRUST_*` inputs/paths.
+- `requirements-dev.txt`, `requirements.yml`, `.ansible-lint`, `.yamllint`, `.pre-commit-config.yaml` — dependency and QA policy. `scripts/verify-ssot.sh` checks documentation/configuration consistency.
+- `scripts/backup.sh`, `scripts/restore.sh`, `scripts/synthetic-check.sh` — live operations; see [Operations](docs/operations.md). Backup quiesces Compose and defaults to age encryption (`AGE_KEY`); restore validates extraction and readiness with rollback.
+- `docs/extensions.md` — supported `docker-compose.override.yml` and `Caddyfile.d/` extension points; keep services private and digest-pinned.
+- `docs/releasing.md`, `scripts/build-release-artifacts.sh`, `scripts/publish-release.sh` — signed release/attestation flow. The release workflow builds a verified draft, not a test gate; complete acceptance checks before tagging and use the publisher script.
 
 ## Runtime/Tooling Preferences
 
-- Use Python/Ansible tooling, not Node/Bun. There is no `package.json`, Makefile, or project package-manager manifest.
-- `requirements-dev.txt` is the source of pinned controller and QA dependencies; `scripts/bootstrap.sh` installs it with the pinned collections in `requirements.yml`.
-- `install.sh` targets a fresh Debian/Ubuntu VPS and requires root, `apt-get`, `/dev/net/tun`, and interactive `/dev/tty` unless `ZERO_TRUST_NONINTERACTIVE=1` is supplied. Use it only against a disposable/test VPS during development.
-- `ansible.cfg` enables strict host-key checking. Do not weaken it to paper over connectivity failures.
-- Keep generated inventories, real vaults, `.vault_password`, persistent volumes, and fetched certificates untracked as configured by `.gitignore`.
+- Use Python 3, Bash, Ansible, pip/venv, and Ansible Galaxy—not Node/Bun. Bootstrap installs exact pins, including pytest 9.1.1; collection dependencies are `community.docker`, `community.general`, and `ansible.posix`.
+- Supported target: fresh Debian 12 or Ubuntu 24.04, amd64/x86_64, at least 900 MiB OS-visible RAM, `/dev/net/tun`, and WireGuard support. Swap/zram are not managed; broad package upgrades are opt-in.
+- Installer execution requires root and apt; interactive mode needs `/dev/tty`. Automation uses `NOOK_NONINTERACTIVE=1`; `NOOK_DEV_MODE=1` source overrides are only for disposable tests. Never weaken signature or host-key checks.
+- Keep real inventory, vaults, `.vault_password`, logs, volumes, fetched certificates, and `.venv` untracked per `.gitignore`. Provider firewall/routing and rescue access remain operator responsibilities.
 
 ## Testing & QA
 
-`.github/workflows/ci.yml` runs CI: its static job executes `scripts/bootstrap.sh` then `scripts/check.sh`, and its QEMU job runs the services-only install scenario. `.github/workflows/release.yml` owns tagged-release validation; run `scripts/check.sh --release` for the corresponding local release checks. Align changed commands or validation wiring with those entrypoints and `.pre-commit-config.yaml`.
+Pytest is the sequential runner; do not use xdist. `tests/registry.py` registers Bash contracts and VM scenarios and guards historical/native scenario boundaries. `tests/conftest.py` owns selection and fixtures; `tests/support.py` owns snapshots, subprocess execution, cleanup, and private diagnostics. Register new Bash contracts in the registry rather than adding another dispatcher.
 
-The test suite is Bash/Ansible fixture based—there is no Molecule, pytest, tox, or coverage setup. Run the narrow contract that covers a changed behavior, for example:
+Plain `pytest` defaults to `quick`; explicit `-m qemu`, `-m lifecycle`, `-m remote`, or `-m release` replaces that selection. Collection runs no subprocesses or deployment preparation. Execution fixtures preserve Git history/tags and dirty source in private snapshots, excluding ignored operator files; create deployment examples there, never in the working checkout.
 
-```bash
-bash tests/validation/ansible-runtime.sh
-bash tests/validation/compose-render.sh
-bash tests/validation/installer-contract.sh
-bash tests/validation/backup-sandbox.sh
-bash tests/validation/restore-sandbox.sh
-```
+No percentage-coverage gate: prove affected behavior, idempotency, failure propagation, and rollback. Native PTY/mocked-systemd tests do not replace real provisioning or SSH coverage. Some quick contracts invoke Docker Compose; missing prerequisites fail rather than silently skip. Quick checks never invoke host sudo, including in CI; real installer sudo/PTY coverage runs only inside the disposable QEMU guest.
 
-`tests/validation/workflow-contract.sh` validates workflow and contributor-entrypoint structure. `scripts/check.sh` reads `tests/validation/manifest.txt` and runs every listed validation contract. When changing validation wiring, update the manifest as needed and verify the workflow/entrypoint structure with:
+CI runs quick checks and services-mode QEMU on Debian 12/Ubuntu 24.04; weekly adds lifecycle/restore. QEMU requires KVM, `qemu-system-x86_64`, `qemu-img`, `genisoimage`, and SSH/network tools. Real remote/public and full/IPv6 scenarios have additional prerequisites; use disposable hosts and pinned host keys. See [E2E](tests/e2e/README.md) for scope and commands: VM success does not prove provider networking, and `tests/ansible-pull-smoke.yml` proves only localhost inventory resolution.
 
-```bash
-bash tests/validation/workflow-contract.sh
-```
-
-Use `tests/ansible-pull-smoke.yml` for the limited localhost `ansible-pull` inventory contract. Use the QEMU/KVM E2E scripts only for deployment/runtime changes that require real VM behavior; see `tests/e2e/README.md` and do not claim provider firewall/routing coverage from QEMU alone.
+[Contributing](CONTRIBUTING.md) owns timeouts and diagnostics. Use `NOOK_JUNIT_DIR=reports scripts/check.sh` or pytest's `--junitxml`; raw logs remain in private `nook-pytest-logs.*` directories. Inspect for secrets before sharing and remove them after diagnosis. Keep registry, `check.sh`, pre-commit, and workflow gates aligned.

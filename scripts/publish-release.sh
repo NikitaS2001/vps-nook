@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-readonly REPOSITORY='NikitaS2001/ansible-zero-trust-vps'
+readonly REPOSITORY='NikitaS2001/vps-nook'
 
 fail() { printf '[FAIL] %s\n' "$*" >&2; exit 1; }
 pass() { printf '[PASS] %s\n' "$*"; }

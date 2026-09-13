@@ -95,9 +95,9 @@ packages = document.get("packages", [])
 source = [item for item in packages if item.get("SPDXID") == "SPDXRef-Package-Source"]
 valid = (
     document.get("spdxVersion") == "SPDX-2.3"
-    and document.get("name") == f"ansible-zero-trust-vps-{tag}"
+    and document.get("name") == f"vps-nook-{tag}"
     and document.get("documentNamespace")
-        == f"https://github.com/NikitaS2001/ansible-zero-trust-vps/releases/download/{tag}/sbom.spdx.json?sha={sha}"
+        == f"https://github.com/NikitaS2001/vps-nook/releases/download/{tag}/sbom.spdx.json?sha={sha}"
     and len(source) == 1
     and source[0].get("versionInfo") == tag
     and {row.get("algorithm"): row.get("checksumValue") for row in source[0].get("checksums", [])}.get("SHA1") == sha
@@ -108,9 +108,9 @@ PY
     exit 0
 fi
 
-changelog_release_line="$(grep -E '^## \[v1\.3\.2\] - (Unreleased|[0-9]{4}-[0-9]{2}-[0-9]{2})$' CHANGELOG.md || true)"
+changelog_release_line="$(grep -E '^## \[v2\.0\.0\] - (Unreleased|[0-9]{4}-[0-9]{2}-[0-9]{2})$' CHANGELOG.md || true)"
 [[ "$(wc -l <<<"${changelog_release_line}")" -eq 1 && -n "${changelog_release_line}" ]] \
-    || fail "CHANGELOG must contain one v1.3.2 heading with Unreleased or an ISO release date"
+    || fail "CHANGELOG must contain one v2.0.0 heading with Unreleased or an ISO release date"
 grep -Fxq '## [v1.2.1] - 2026-08-20' CHANGELOG.md \
     || fail "CHANGELOG v1.2.1 date is incorrect"
 
@@ -126,7 +126,7 @@ pass "structural release contract"
 
 [[ "${mode}" == '--tag' ]] || exit 0
 
-[[ "${changelog_release_line}" =~ ^##\ \[v1\.3\.2\]\ -\ [0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] \
+[[ "${changelog_release_line}" =~ ^##\ \[v2\.0\.0\]\ -\ [0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] \
     || fail "tagged CHANGELOG must replace Unreleased with the ISO release date"
 
 tag_name="${GITHUB_REF_NAME:-$(isolated_git describe --tags --exact-match 2>/dev/null || true)}"

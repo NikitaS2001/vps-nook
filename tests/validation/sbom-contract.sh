@@ -91,7 +91,7 @@ for candidate in re.findall(r"^\s*image:\s*(\S.*)$", template, re.MULTILINE):
 
 def validate(candidate):
     assert candidate["spdxVersion"] == "SPDX-2.3"
-    assert candidate["name"] == "ansible-zero-trust-vps-v9.9.9"
+    assert candidate["name"] == "vps-nook-v9.9.9"
     packages = candidate["packages"]
     ids = [package["SPDXID"] for package in packages]
     assert len(ids) == len(set(ids))

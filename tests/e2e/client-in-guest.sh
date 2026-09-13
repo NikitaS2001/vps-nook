@@ -16,7 +16,7 @@ set -euo pipefail
 WG_USER="${WG_USER:-admin}"
 WG_ENDPOINT="${WG_ENDPOINT:-}"
 WG_PORT="${WG_PORT:-51820}"
-ROOT_CA="${ROOT_CA:-/opt/zero-trust-vps-installer/repo/fetched_certs/localhost/root.crt}"
+ROOT_CA="${ROOT_CA:-/opt/vps-nook-installer/repo/fetched_certs/localhost/root.crt}"
 WG_TRAFFIC_MODE="${WG_TRAFFIC_MODE:-services}"
 CLIENT_NAME="e2e-client-$(date +%s)"
 UI_PORT="${UI_PORT:-51821}"

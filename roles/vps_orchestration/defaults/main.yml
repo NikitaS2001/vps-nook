@@ -1,6 +1,6 @@
 ---
 # Project paths
-project_root: "/opt/zero-trust-vps"
+project_root: "/opt/vps-nook"
 vps_services_vault_path: "{{ playbook_dir }}/group_vars/all/vault_services.yml"
 
 # Docker network

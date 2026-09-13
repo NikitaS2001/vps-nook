@@ -13,3 +13,9 @@ inventory/hosts.yml
 __pycache__/
 *.pyc
 .venv/
+.pytest_cache/
+reports/
+
+# Local migration notes and acceptance evidence
+/docs/pytest-migration.md
+/docs/pytest-validation.md

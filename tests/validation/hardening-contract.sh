@@ -174,7 +174,12 @@ if tcp_proof.get("ansible.builtin.wait_for", {}).get("port") != (
     "{{ vps_hardening_controller_ssh_port }}"
 ):
     raise SystemExit("delegated TCP proof must use the controller-facing hardened SSH port")
-authenticated = [task for task in ordered if "ansible.builtin.wait_for_connection" in task]
+authenticated = [task for task in ordered if "ansible.builtin.wait_for_connection" in task
+                 and task.get("name", "").startswith("SSH | Verify |")]
+recovery = [task for task in ordered if "ansible.builtin.wait_for_connection" in task
+            and task.get("name", "").startswith("SSH | Rescue |")]
+if len(recovery) != 1 or recovery[0].get("vars") or recovery[0].get("delegate_to"):
+    raise SystemExit("SSH recovery must authenticate over the unchanged original connection, including proxies")
 if len(authenticated) != 1:
     raise SystemExit("SSH cutover must require exactly one authenticated wait_for_connection proof")
 proof = authenticated[0]

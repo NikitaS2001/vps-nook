@@ -1,7 +1,8 @@
 # Documentation
 
 Start with [Getting started](getting-started.md) for either the verified public
-installer or a remote Ansible controller.
+installer or a remote Ansible controller. v2.0.0 installation URLs remain
+previews until publication; see [compatibility](../UPGRADE.md).
 
 | Guide | Use it when |
 | --- | --- |

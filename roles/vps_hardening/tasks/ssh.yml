@@ -1,4 +1,135 @@
 ---
+- name: "SSH | Preflight | Ensure privilege separation directory"
+  ansible.builtin.file:
+    path: /run/sshd
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  tags: [ssh]
+
+- name: "SSH | Snapshot | Read original effective configuration"
+  ansible.builtin.command: /usr/sbin/sshd -T
+  register: vps_hardening_original_sshd
+  changed_when: false
+  tags: [ssh]
+
+- name: "SSH | Snapshot | Read original listeners"
+  ansible.builtin.command: ss -H -ltnp
+  register: vps_hardening_original_listeners
+  changed_when: false
+  tags: [ssh]
+
+- name: "SSH | Snapshot | Read service and socket state"
+  ansible.builtin.service_facts:
+  tags: [ssh]
+
+- name: "SSH | Snapshot | Read socket unit properties"
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - show
+      - "{{ ssh_socket_name }}"
+      - --property=LoadState
+      - --property=ActiveState
+      - --property=UnitFileState
+      - --property=Listen
+  register: vps_hardening_original_socket_properties
+  changed_when: false
+  tags: [ssh]
+
+- name: "SSH | Snapshot | Normalize SSH service fact key"
+  ansible.builtin.set_fact:
+    vps_hardening_ssh_service_fact_name: "{{ (ssh_service_name | regex_replace('\\.service$', '')) ~ '.service' }}"
+  tags: [ssh]
+
+- name: "SSH | Snapshot | Preserve recovery state"
+  ansible.builtin.set_fact:
+    vps_hardening_original_ssh_service: "{{ ansible_facts.services[vps_hardening_ssh_service_fact_name] }}"
+    vps_hardening_original_ssh_socket: >-
+      {{ {'state': ('running' if 'ActiveState=active' in vps_hardening_original_socket_properties.stdout_lines else 'stopped'),
+          'status': ('enabled' if 'UnitFileState=enabled' in vps_hardening_original_socket_properties.stdout_lines else 'disabled')}
+         if 'LoadState=loaded' in vps_hardening_original_socket_properties.stdout_lines else {} }}
+    vps_hardening_ssh_activation_started: false
+    vps_hardening_ssh_rollback: false
+  tags: [ssh]
+
+- name: "SSH | Snapshot | Initialize original SSH listeners"
+  ansible.builtin.set_fact:
+    vps_hardening_original_ssh_listeners: []
+    vps_hardening_original_ssh_listener_endpoints: []
+  tags: [ssh]
+
+- name: "SSH | Snapshot | Preserve listeners from active sshd"
+  ansible.builtin.set_fact:
+    vps_hardening_original_ssh_listeners: >-
+      {{ vps_hardening_original_ssh_listeners + [{
+          'address': item | regex_replace('^(.*):[0-9]+$', '\1') | regex_replace('^\[|\]$', ''),
+          'port': item | regex_replace('^.*:([0-9]+)$', '\1') | int
+      }] }}
+    vps_hardening_original_ssh_listener_endpoints: "{{ vps_hardening_original_ssh_listener_endpoints + [item] }}"
+  loop: >-
+    {{ vps_hardening_original_listeners.stdout_lines | select('search', 'sshd')
+       | map('regex_replace', '[ \t]+', ' ') | map('trim') | map('split') | map(attribute=3) | list }}
+  when:
+    - item is match('^.*:[0-9]+$')
+    - item not in vps_hardening_original_ssh_listener_endpoints
+  tags: [ssh]
+
+- name: "SSH | Snapshot | Preserve listeners from active socket"
+  ansible.builtin.set_fact:
+    vps_hardening_original_ssh_listeners: >-
+      {{ vps_hardening_original_ssh_listeners + [{
+          'address': item | regex_replace('^(.*):[0-9]+$', '\1') | regex_replace('^\[|\]$', ''),
+          'port': item | regex_replace('^.*:([0-9]+)$', '\1') | int
+      }] }}
+    vps_hardening_original_ssh_listener_endpoints: "{{ vps_hardening_original_ssh_listener_endpoints + [item] }}"
+  loop: >-
+    {{ vps_hardening_original_socket_properties.stdout_lines
+       | select('match', '^Listen=.* [(]Stream[)]$')
+       | map('regex_replace', '^Listen=(.*) [(]Stream[)]$', '\1') | list }}
+  when:
+    - vps_hardening_original_ssh_listeners | length == 0
+    - "'ActiveState=active' in vps_hardening_original_socket_properties.stdout_lines"
+    - item is match('^.*:[0-9]+$')
+    - item not in vps_hardening_original_ssh_listener_endpoints
+  tags: [ssh]
+
+- name: "SSH | Snapshot | Preserve listeners from sshd configuration"
+  ansible.builtin.set_fact:
+    vps_hardening_original_ssh_listeners: >-
+      {{ vps_hardening_original_ssh_listeners + [{
+          'address': item | regex_replace('^listenaddress (.*):[0-9]+$', '\1') | regex_replace('^\[|\]$', ''),
+          'port': item | regex_replace('^.*:([0-9]+)$', '\1') | int
+      }] }}
+    vps_hardening_original_ssh_listener_endpoints: "{{ vps_hardening_original_ssh_listener_endpoints + [item] }}"
+  loop: "{{ vps_hardening_original_sshd.stdout_lines | select('match', '^listenaddress .*:[0-9]+$') | list }}"
+  when:
+    - vps_hardening_original_ssh_listeners | length == 0
+    - item not in vps_hardening_original_ssh_listener_endpoints
+  tags: [ssh]
+
+- name: "SSH | Snapshot | Preserve loopback ports from sshd configuration"
+  ansible.builtin.set_fact:
+    vps_hardening_original_ssh_listeners: >-
+      {{ vps_hardening_original_ssh_listeners + [{
+          'address': '127.0.0.1',
+          'port': item | regex_replace('^port ', '') | int
+      }] }}
+    vps_hardening_original_ssh_listener_endpoints: "{{ vps_hardening_original_ssh_listener_endpoints + [item] }}"
+  loop: "{{ vps_hardening_original_sshd.stdout_lines | select('match', '^port [0-9]+$') | list }}"
+  when:
+    - vps_hardening_original_ssh_listeners | length == 0
+    - item not in vps_hardening_original_ssh_listener_endpoints
+  tags: [ssh]
+
+- name: "SSH | Snapshot | Require original recovery listeners"
+  ansible.builtin.assert:
+    that:
+      - vps_hardening_original_ssh_listeners | length > 0
+    fail_msg: "Cannot establish original SSH listeners; refusing cutover."
+  tags: [ssh]
+
 - name: "SSH | Config | Apply and verify hardened sshd_config"
   block:
     - name: "SSH | Config | Apply hardened sshd_config"
@@ -12,12 +143,21 @@
       notify: restart sshd
       tags: [ssh]
 
-    - name: "SSH | Socket | Check systemd socket unit"  # noqa: command-instead-of-module
-      ansible.builtin.command: "systemctl list-unit-files {{ ssh_socket_name }} --no-legend"
-      register: vps_hardening_ssh_socket_unit
-      changed_when: false
-      failed_when: false
-      when: vps_hardening_manage_ssh_socket | bool
+    - name: "SSH | Config | Mark activation boundary"
+      ansible.builtin.set_fact:
+        vps_hardening_ssh_activation_started: true
+      tags: [ssh]
+
+    # Stop the socket-owned listener while systemd still owns its MainPID.
+    # Disabling the socket first can leave that listener outside service tracking.
+    # KillMode=process on supported platforms preserves established sessions.
+    - name: "SSH | Socket | Stop service before disabling active socket"
+      ansible.builtin.systemd_service:
+        name: "{{ ssh_service_name }}"
+        state: stopped
+      when:
+        - vps_hardening_manage_ssh_socket | bool
+        - vps_hardening_original_ssh_socket.state | default('stopped') == 'running'
       tags: [ssh]
 
     - name: "SSH | Socket | Disable socket activation for hardened sshd_config"
@@ -27,7 +167,7 @@
         enabled: no
       when:
         - vps_hardening_manage_ssh_socket | bool
-        - vps_hardening_ssh_socket_unit.rc | default(1) == 0
+        - vps_hardening_original_ssh_socket | length > 0
       notify: restart sshd
       tags: [ssh]
 
@@ -38,7 +178,7 @@
         enabled: yes
       when:
         - vps_hardening_manage_ssh_socket | bool
-        - vps_hardening_ssh_socket_unit.rc | default(1) == 0
+        - vps_hardening_original_ssh_socket | length > 0
       notify: restart sshd
       tags: [ssh]
 
@@ -75,37 +215,85 @@
       when: (hostvars[inventory_hostname].ansible_connection | default("ssh")) != "local"
       tags: [ssh]
   rescue:
+    - name: "SSH | Rescue | Suppress queued cutover restart"
+      ansible.builtin.set_fact:
+        vps_hardening_ssh_rollback: true
+      tags: [ssh]
+
     - name: "SSH | Rescue | Restore previous sshd_config"
       ansible.builtin.copy:
         src: "{{ vps_hardening_sshd_config.backup_file }}"
         dest: /etc/ssh/sshd_config
         remote_src: true
+        validate: '/usr/sbin/sshd -t -f %s'
         mode: '0644'
       when: vps_hardening_sshd_config.backup_file is defined
-      notify: restart sshd
       tags: [ssh]
 
-    - name: "SSH | Rescue | Check whether original SSH listener survived"
-      ansible.builtin.wait_for:
-        host: 127.0.0.1
-        port: "{{ ansible_port | int }}"
-        state: started
-        timeout: 1
-      register: vps_hardening_original_ssh_listener
-      changed_when: false
-      failed_when: false
-      tags: [ssh]
-
-    - name: "SSH | Rescue | Restart sshd when original listener is absent"
+    - name: "SSH | Rescue | Drain queued handlers without activating failed candidate"
       ansible.builtin.meta: flush_handlers
-      when: (vps_hardening_original_ssh_listener.state | default("")) != "started"
       tags: [ssh]
 
-    - name: "SSH | Rescue | Fail after restoring previous sshd_config"
+    - name: "SSH | Rescue | Release listeners before restoring active socket"
+      ansible.builtin.systemd_service:
+        name: "{{ ssh_service_name }}"
+        state: stopped
+      when:
+        - vps_hardening_ssh_activation_started | bool
+        - vps_hardening_manage_ssh_socket | bool
+        - vps_hardening_original_ssh_socket.state | default('stopped') == 'running'
+      tags: [ssh]
+
+    - name: "SSH | Rescue | Restore socket activation"
+      ansible.builtin.systemd_service:
+        name: "{{ ssh_socket_name }}"
+        daemon_reload: true
+        state: "{{ 'started' if vps_hardening_original_ssh_socket.state == 'running' else 'stopped' }}"
+        enabled: "{{ vps_hardening_original_ssh_socket.status == 'enabled' }}"
+      when:
+        - vps_hardening_ssh_activation_started | bool
+        - vps_hardening_manage_ssh_socket | bool
+        - vps_hardening_original_ssh_socket | length > 0
+      tags: [ssh]
+
+    - name: "SSH | Rescue | Restore service state"
+      ansible.builtin.systemd_service:
+        name: "{{ ssh_service_name }}"
+        state: >-
+          {{ ('started' if (vps_hardening_manage_ssh_socket
+                            and vps_hardening_original_ssh_socket.state | default('stopped') == 'running')
+              else 'restarted') if vps_hardening_original_ssh_service.state == 'running' else 'stopped' }}
+        enabled: "{{ vps_hardening_original_ssh_service.status == 'enabled' }}"
+      when: vps_hardening_ssh_activation_started | bool
+      tags: [ssh]
+
+    - name: "SSH | Rescue | Check original local listeners"
+      ansible.builtin.wait_for:
+        host: "{{ '127.0.0.1' if item.address in ['0.0.0.0', '*'] else '::1' if item.address == '::' else item.address }}"
+        port: "{{ item.port | int }}"
+        state: started
+        timeout: 10
+      loop: "{{ vps_hardening_original_ssh_listeners }}"
+      when: vps_hardening_ssh_activation_started | bool
+      tags: [ssh]
+
+    - name: "SSH | Rescue | Authenticate through original remote path"
+      ansible.builtin.wait_for_connection:
+        timeout: 30
+        connect_timeout: 5
+        sleep: 1
+      when:
+        - vps_hardening_ssh_activation_started | bool
+        - ansible_connection | default('ssh') != 'local'
+      tags: [ssh]
+
+    - name: "SSH | Rescue | Report failed cutover"
       ansible.builtin.fail:
         msg: >-
-          Hardened SSH config was applied but the new SSH port was unreachable.
-          The previous sshd_config was restored when a backup was available.
+          {{ 'SSH activation failed; previous configuration and service state were restored and listeners checked.'
+             if vps_hardening_ssh_activation_started
+             else 'SSH candidate validation failed before activation; the existing SSH service was not restarted.' }}
+          The old firewall allowance was retained. Verify remote access before disconnecting.
       tags: [ssh]
 
 # Cutover succeeded: drop the temporary allow rule for the old connection

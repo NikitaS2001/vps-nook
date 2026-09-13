@@ -16,7 +16,7 @@
 #   INSTALL_REF      git ref to install (default: current branch)
 #   E2E_SSH_PORT     hardened SSH port configured by the installer (default 2222)
 #   E2E_WG_PORT      WireGuard UDP port configured by the installer (default 51820)
-#   ZERO_TRUST_WG_TRAFFIC_MODE  services or full (default services)
+#   NOOK_WG_TRAFFIC_MODE  services or full (default services)
 #   QEMU_SSH_PORT    host tcp port -> guest:22  (default 2223)
 #   QEMU_ADMIN_PORT  host tcp port -> guest:<E2E_SSH_PORT> (default 2222)
 #   QEMU_WG_PORT     host udp port -> guest:<E2E_WG_PORT> (default 51822)
@@ -48,6 +48,13 @@ list_existing_source_paths() {
     done < <(git -C "${source_root}" ls-files -z --cached --others --exclude-standard)
 }
 
+snapshot_source() {
+    local source_root="$1" destination="$2"
+    mkdir -p "${destination}"
+    list_existing_source_paths "${source_root}" | \
+        tar -C "${source_root}" --null -cf - --files-from - | tar -xf - -C "${destination}"
+}
+
 build_installer_credential_env() {
     local state_mode="$1" admin_password="$2" adguard_password="$3"
     local wg_password="$4" public_key="$5"
@@ -59,7 +66,7 @@ build_installer_credential_env() {
             printf -v quoted_adguard '%q' "${adguard_password}"
             printf -v quoted_wg '%q' "${wg_password}"
             printf -v quoted_key '%q' "${public_key}"
-            printf 'ZERO_TRUST_ADMIN_PASSWORD=%s ZERO_TRUST_ADGUARD_PASSWORD=%s ZERO_TRUST_WG_PASSWORD=%s ZERO_TRUST_SSH_PUBKEY=%s' \
+            printf 'NOOK_ADMIN_PASSWORD=%s NOOK_ADGUARD_PASSWORD=%s NOOK_WG_PASSWORD=%s NOOK_SSH_PUBKEY=%s' \
                 "${quoted_admin}" "${quoted_adguard}" "${quoted_wg}" "${quoted_key}"
             ;;
         existing) ;;
@@ -70,6 +77,11 @@ build_installer_credential_env() {
 if [[ ${1:-} == --self-test-source-list ]]; then
     [[ $# -eq 2 && -d $2 ]] || fail '--self-test-source-list requires one directory'
     list_existing_source_paths "$2"
+    exit 0
+fi
+if [[ ${1:-} == --self-test-source-snapshot ]]; then
+    [[ $# -eq 3 && -d $2 ]] || fail '--self-test-source-snapshot requires source and destination'
+    snapshot_source "$2" "$3"
     exit 0
 fi
 if [[ ${1:-} == --self-test-installer-env ]]; then
@@ -152,20 +164,23 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
+# Keep the installed tree and later client checks on the same source revision.
+SOURCE_DIR="${TMP_DIR}/source"
+snapshot_source "${ROOT_DIR}" "${SOURCE_DIR}"
+
 # --- test fixtures ----------------------------------------------------------
 ssh-keygen -q -t ed25519 -N "" -f "${TMP_DIR}/id_ed25519" -C "e2e-ztvps"
 PUBKEY="$(cat "${TMP_DIR}/id_ed25519.pub")"
 ADMIN_PASS="$(openssl rand -hex 12)"
 ADGUARD_PASS="$(openssl rand -hex 12)"
-WG_PASS="${ZERO_TRUST_WG_PASSWORD:-Twelve\$COMPOSE_PROBE}"
-WG_TRAFFIC_MODE="${ZERO_TRUST_WG_TRAFFIC_MODE:-services}"
+WG_PASS="${NOOK_WG_PASSWORD:-Twelve\$COMPOSE_PROBE}"
+WG_TRAFFIC_MODE="${NOOK_WG_TRAFFIC_MODE:-services}"
 
 copy_repo_to_guest() {
     local target="$1" port="$2" key="$3"
     run_remote "${target}" "${port}" "${key}" \
         "command -v git >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq git)"
-    list_existing_source_paths "${ROOT_DIR}" | \
-        tar --null -czf - --files-from - | \
+    tar -C "${SOURCE_DIR}" -czf - . | \
         run_remote_stdin "${target}" "${port}" "${key}" \
         "sudo mkdir -p /tmp/ztrepo && sudo find /tmp/ztrepo -mindepth 1 -delete && sudo tar xzf - -C /tmp/ztrepo && sudo chown -R \$(id -u):\$(id -g) /tmp/ztrepo && cd /tmp/ztrepo && git init -q -b '${INSTALL_REF}' && git add -A && git -c user.name=e2e -c user.email=e2e.invalid commit -qm e2e-source"
 }
@@ -176,25 +191,26 @@ run_repository_installer() {
     local credential_env=""
     local source_env=""
     local installer_log="${TMP_DIR}/installer.log"
+    local installer_status=0
     credential_env="$(build_installer_credential_env \
         "${state_mode}" "${ADMIN_PASS}" "${ADGUARD_PASS}" "${WG_PASS}" "${PUBKEY}")"
     if [[ "${E2E_SOURCE_MODE}" == "development" ]]; then
-        source_env="ZERO_TRUST_DEV_MODE=1 ZERO_TRUST_REPO_URL=/tmp/ztrepo ZERO_TRUST_RELEASE_REF='${INSTALL_REF}'"
+        source_env="NOOK_DEV_MODE=1 NOOK_REPO_URL=/tmp/ztrepo NOOK_RELEASE_REF='${INSTALL_REF}'"
     fi
     run_remote "${target}" "${port}" "${key}" \
         "cd /tmp/ztrepo && sudo env \
         PATH='${E2E_DOCKER_PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}' \
-        ZERO_TRUST_NONINTERACTIVE=1 \
+        NOOK_NONINTERACTIVE=1 \
         ${source_env} \
-        ZERO_TRUST_SSH_PORT='${E2E_SSH_PORT}' \
-        ZERO_TRUST_WG_PORT='${E2E_WG_PORT}' \
-        ZERO_TRUST_ADMIN_USER=sysadmin \
+        NOOK_SSH_PORT='${E2E_SSH_PORT}' \
+        NOOK_WG_PORT='${E2E_WG_PORT}' \
+        NOOK_ADMIN_USER=sysadmin \
         ${credential_env} \
-        ZERO_TRUST_WG_TRAFFIC_MODE='${WG_TRAFFIC_MODE}' \
-        ZERO_TRUST_INTERNAL_DOMAIN_SUFFIX='${INTERNAL_DOMAIN_SUFFIX}' \
-        ZERO_TRUST_INTERNAL_DOMAINS='${WG_INTERNAL_DOMAIN} ${ADGUARD_INTERNAL_DOMAIN}' \
-        ZERO_TRUST_WG_HOST=127.0.0.1 \
-        bash ./install.sh" 2>&1 | tee "${installer_log}"
+        NOOK_WG_TRAFFIC_MODE='${WG_TRAFFIC_MODE}' \
+        NOOK_INTERNAL_DOMAIN_SUFFIX='${INTERNAL_DOMAIN_SUFFIX}' \
+        NOOK_INTERNAL_DOMAINS='${WG_INTERNAL_DOMAIN} ${ADGUARD_INTERNAL_DOMAIN}' \
+        NOOK_WG_HOST=127.0.0.1 \
+        bash ./install.sh" 2>&1 | tee "${installer_log}" || installer_status=$?
     if [[ "${E2E_SOURCE_MODE}" == "development" ]]; then
         grep -Fq "NON-PRODUCTION DEVELOPMENT MODE" "${installer_log}" || \
             fail "development installer warning was not emitted"
@@ -204,6 +220,9 @@ run_repository_installer() {
         ! grep -Fq "NON-PRODUCTION DEVELOPMENT MODE" "${installer_log}" || \
             fail "production installer emitted the development warning"
     fi
+    # Callers intentionally use this function in an if/pipeline, disabling
+    # errexit within it. Provenance checks must not mask a failed installer.
+    return "${installer_status}"
 }
 
 verify_wg_login() {
@@ -221,18 +240,18 @@ verify_bootstrap_secret_free() {
     # shellcheck disable=SC2016
     run_remote "${target}" "${port}" "${key}" \
         'sudo sh -eu -c '\''
-            if grep -Eq "^[[:space:]]+INIT_[A-Z_]+:" /opt/zero-trust-vps/docker-compose.yml; then exit 1; fi
+            if grep -Eq "^[[:space:]]+INIT_[A-Z_]+:" /opt/vps-nook/docker-compose.yml; then exit 1; fi
             inspect_env="$(docker inspect wg-easy --format "{{range .Config.Env}}{{println .}}{{end}}")"
             if printf "%s\n" "$inspect_env" | grep -q "^INIT_PASSWORD="; then exit 1; fi
             if printf "%s\n" "$inspect_env" | grep "^INIT_" | grep -qvx "INIT_ENABLED=false"; then exit 1; fi
-            if find /opt/zero-trust-vps -maxdepth 1 -type f -name "docker-compose.yml.bak*" -print -quit | grep -q .; then exit 1; fi
+            if find /opt/vps-nook -maxdepth 1 -type f -name "docker-compose.yml.bak*" -print -quit | grep -q .; then exit 1; fi
         '\''' >/dev/null
 }
 
 verify_bootstrap_state() {
     local target="$1" port="$2" key="$3" expected="$4"
     run_remote "${target}" "${port}" "${key}" \
-        "sudo EXPECTED_STATE='${expected}' python3 -c \"import os, pathlib, sqlite3; path=pathlib.Path('/opt/zero-trust-vps/volumes/wg-easy/wg-easy.db'); expected=os.environ['EXPECTED_STATE']; rows=[] if not path.exists() else sqlite3.connect(path).execute('SELECT setup_step FROM general_table').fetchall(); complete=(rows == [(0,)]); raise SystemExit(0 if (complete if expected == 'complete' else not complete) else 1)\""
+        "sudo EXPECTED_STATE='${expected}' python3 -c \"import os, pathlib, sqlite3; path=pathlib.Path('/opt/vps-nook/volumes/wg-easy/wg-easy.db'); expected=os.environ['EXPECTED_STATE']; rows=[] if not path.exists() else sqlite3.connect(path).execute('SELECT setup_step FROM general_table').fetchall(); complete=(rows == [(0,)]); raise SystemExit(0 if (complete if expected == 'complete' else not complete) else 1)\""
 }
 
 verify_bootstrap_auth_tasks_ran() {
@@ -285,11 +304,11 @@ run_compose_deployment() {
     local adguard_domain="${6:-${ADGUARD_INTERNAL_DOMAIN:-adguard.internal}}"
     local docker_path="${7:-${E2E_DOCKER_PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}}"
     run_remote "${target}" "${port}" "${key}" \
-        "sudo env PATH='${docker_path}' sh -c 'cd /opt/zero-trust-vps-installer/repo && \
-        exec /opt/zero-trust-vps-installer/venv/bin/ansible-playbook \
+        "sudo env PATH='${docker_path}' sh -c 'cd /opt/vps-nook-installer/repo && \
+        exec /opt/vps-nook-installer/venv/bin/ansible-playbook \
         -i inventory/localhost.yml site.yml --tags compose \
-        --vault-password-file /etc/zero-trust-vps/installer-vault.pass \
-        --extra-vars @/etc/zero-trust-vps/installer-vault.yml \
+        --vault-password-file /etc/vps-nook/installer-vault.pass \
+        --extra-vars @/etc/vps-nook/installer-vault.yml \
         -e internal_domain_suffix=\"\$1\" \
         -e wg_internal_domain=\"\$2\" \
         -e adguard_internal_domain=\"\$3\"' \
@@ -354,6 +373,10 @@ require_wrong_scp_host_key_rejected "${GUEST}" "${QEMU_SSH_PORT}" \
 # --- copy the repo into the guest -------------------------------------------
 echo "[E2E] Copying the repository into the guest..."
 copy_repo_to_guest "${GUEST}" "${QEMU_SSH_PORT}" "${TMP_DIR}/id_ed25519"
+
+echo "[E2E] Checking the installer sudo pipeline in a guest PTY..."
+run_remote "${GUEST}" "${QEMU_SSH_PORT}" "${TMP_DIR}/id_ed25519" \
+    "cd /tmp/ztrepo && python3 -m tests.e2e.installer_sudo"
 
 if [[ "${DO_BOOTSTRAP_TIMEOUT}" == "true" ]]; then
     echo "[E2E] Injecting a bounded pre-setup wg-easy startup timeout..."
@@ -459,7 +482,7 @@ if [[ "${DO_CLIENT_TEST}" == "true" ]]; then
     echo "[E2E] Running the in-guest WireGuard client handshake test..."
     run_remote_stdin "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
         "sudo WG_PASSWORD='${WG_PASS}' WG_PORT='${E2E_WG_PORT}' WG_TRAFFIC_MODE='${WG_TRAFFIC_MODE}' WG_INTERNAL_DOMAIN='${WG_INTERNAL_DOMAIN}' ADGUARD_INTERNAL_DOMAIN='${ADGUARD_INTERNAL_DOMAIN}' bash -s" \
-        < "${E2E_DIR}/client-in-guest.sh"
+        < "${SOURCE_DIR}/tests/e2e/client-in-guest.sh"
 fi
 
 if [[ "${DO_IDEMPOTENCY}" == "true" ]]; then
@@ -517,11 +540,11 @@ if [[ "${DO_IDEMPOTENCY}" == "true" ]]; then
 
     caddy_managed_hash_before="$(run_remote "sysadmin@127.0.0.1" \
         "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
-        "sudo sha256sum /opt/zero-trust-vps/Caddyfile | cut -d' ' -f1")"
+        "sudo sha256sum /opt/vps-nook/Caddyfile | cut -d' ' -f1")"
     if [[ "${DO_INVALID_CADDY}" == "true" || "${DO_IDEMPOTENCY}" == "true" ]]; then
     echo "[E2E] Rejecting an invalid Caddyfile.d candidate without changing the live site..."
     run_remote "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
-        "printf '%s\\n' 'caddy-transaction.invalid {' | sudo tee /opt/zero-trust-vps/Caddyfile.d/e2e-invalid.conf >/dev/null"
+        "printf '%s\\n' 'caddy-transaction.invalid {' | sudo tee /opt/vps-nook/Caddyfile.d/e2e-invalid.conf >/dev/null"
     invalid_caddy_log="${TMP_DIR}/invalid-caddy.log"
     if run_compose_deployment \
         "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" | \
@@ -532,7 +555,7 @@ if [[ "${DO_IDEMPOTENCY}" == "true" ]]; then
         fail "invalid Caddy candidate did not report validation failure"
     caddy_managed_hash_after="$(run_remote "sysadmin@127.0.0.1" \
         "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
-        "sudo sha256sum /opt/zero-trust-vps/Caddyfile | cut -d' ' -f1")"
+        "sudo sha256sum /opt/vps-nook/Caddyfile | cut -d' ' -f1")"
     [[ "${caddy_managed_hash_after}" == "${caddy_managed_hash_before}" ]] || \
         fail "invalid Caddy candidate replaced the managed Caddyfile"
     [[ "$(remote_caddy_admin_hash "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519")" == "${caddy_admin_hash_before}" ]] || \
@@ -545,7 +568,7 @@ if [[ "${DO_IDEMPOTENCY}" == "true" ]]; then
 
     echo "[E2E] Rolling back the managed file and active config after an injected reload failure..."
     run_remote "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
-        "sudo rm -f /opt/zero-trust-vps/Caddyfile.d/e2e-invalid.conf && sudo touch /tmp/e2e-caddy-fail-next-reload"
+        "sudo rm -f /opt/vps-nook/Caddyfile.d/e2e-invalid.conf && sudo touch /tmp/e2e-caddy-fail-next-reload"
     reload_failure_log="${TMP_DIR}/reload-failure.log"
     if run_compose_deployment \
         "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
@@ -556,7 +579,7 @@ if [[ "${DO_IDEMPOTENCY}" == "true" ]]; then
     fi
     grep -Fq "prior managed and active configuration were restored" \
         "${reload_failure_log}" || fail "Caddy reload failure did not report rollback"
-    [[ "$(run_remote "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" "sudo sha256sum /opt/zero-trust-vps/Caddyfile | cut -d' ' -f1")" == "${caddy_managed_hash_before}" ]] || \
+    [[ "$(run_remote "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" "sudo sha256sum /opt/vps-nook/Caddyfile | cut -d' ' -f1")" == "${caddy_managed_hash_before}" ]] || \
         fail "reload failure did not restore the prior managed Caddyfile"
     [[ "$(remote_caddy_admin_hash "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519")" == "${caddy_admin_hash_before}" ]] || \
         fail "reload failure did not restore the prior active config"
@@ -569,7 +592,7 @@ if [[ "${DO_IDEMPOTENCY}" == "true" ]]; then
     echo "[E2E] Recovering with a valid Caddyfile.d change and live reload..."
     caddy_probe_domain="caddy-probe.${INTERNAL_DOMAIN_SUFFIX:-internal}"
     run_remote "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
-        "sudo rm -f /opt/zero-trust-vps/Caddyfile.d/e2e-invalid.conf && printf '%s\\n' '${caddy_probe_domain} {' '    tls internal' '    respond caddy-probe-live 200' '}' | sudo tee /opt/zero-trust-vps/Caddyfile.d/e2e-valid.conf >/dev/null"
+        "sudo rm -f /opt/vps-nook/Caddyfile.d/e2e-invalid.conf && printf '%s\\n' '${caddy_probe_domain} {' '    tls internal' '    respond caddy-probe-live 200' '}' | sudo tee /opt/vps-nook/Caddyfile.d/e2e-valid.conf >/dev/null"
     recovery_caddy_log="${TMP_DIR}/recovery-caddy.log"
     run_compose_deployment \
         "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" | \
@@ -585,7 +608,7 @@ if [[ "${DO_IDEMPOTENCY}" == "true" ]]; then
     verify_caddy_site "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" \
         "${TMP_DIR}/id_ed25519" "${caddy_probe_domain}" caddy-probe-live
     run_remote "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
-        "sudo rm -f /opt/zero-trust-vps/Caddyfile.d/e2e-valid.conf"
+        "sudo rm -f /opt/vps-nook/Caddyfile.d/e2e-valid.conf"
     run_compose_deployment \
         "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" >/dev/null
     [[ "$(remote_reload_count "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519")" == 4 ]] || \
@@ -597,11 +620,11 @@ if [[ "${DO_IDEMPOTENCY}" == "true" ]]; then
 
     echo "[E2E] Exercising retry from a nonzero setup_step..."
     run_remote "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
-        "sudo docker stop wg-easy >/dev/null && sudo python3 -c \"import sqlite3; db=sqlite3.connect('/opt/zero-trust-vps/volumes/wg-easy/wg-easy.db'); db.execute('DELETE FROM users_table'); db.execute('UPDATE general_table SET setup_step=2'); db.commit(); db.close()\""
+        "sudo docker stop wg-easy >/dev/null && sudo python3 -c \"import sqlite3; db=sqlite3.connect('/opt/vps-nook/volumes/wg-easy/wg-easy.db'); db.execute('DELETE FROM users_table'); db.execute('UPDATE general_table SET setup_step=2'); db.commit(); db.close()\""
     run_repository_installer \
         "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" existing
     run_remote "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
-        "sudo python3 -c \"import sqlite3; db=sqlite3.connect('/opt/zero-trust-vps/volumes/wg-easy/wg-easy.db'); rows=db.execute('SELECT setup_step FROM general_table').fetchall(); db.close(); raise SystemExit(0 if rows == [(0,)] else 1)\""
+        "sudo python3 -c \"import sqlite3; db=sqlite3.connect('/opt/vps-nook/volumes/wg-easy/wg-easy.db'); rows=db.execute('SELECT setup_step FROM general_table').fetchall(); db.close(); raise SystemExit(0 if rows == [(0,)] else 1)\""
     verify_wg_login "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519"
     verify_bootstrap_secret_free \
         "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519"

@@ -48,7 +48,7 @@ EOF
     chmod 700 "${bin}/docker" "${bin}/age"
 
     set +e
-    PATH="${bin}:${PATH}" BACKUP_TEST_LOG="${log}" ZERO_TRUST_PROJECT_ROOT="${project}" \
+    PATH="${bin}:${PATH}" BACKUP_TEST_LOG="${log}" NOOK_PROJECT_ROOT="${project}" \
         AGE_KEY="test-recipient" bash "${BACKUP}" "${output}" \
         >"${sandbox}/stdout" 2>"${sandbox}/stderr"
     rc=$?
@@ -78,7 +78,7 @@ printf '%s\n' "$*" >>"${BACKUP_TEST_LOG}"
 EOF
     chmod 700 "${bin}/docker"
     set +e
-    PATH="${bin}:${PATH}" BACKUP_TEST_LOG="${log}" ZERO_TRUST_PROJECT_ROOT="${project}" \
+    PATH="${bin}:${PATH}" BACKUP_TEST_LOG="${log}" NOOK_PROJECT_ROOT="${project}" \
         bash "${BACKUP}" "${output}" >"${sandbox}/stdout" 2>"${sandbox}/stderr"
     rc=$?
     set -e
@@ -105,7 +105,7 @@ printf '%s\n' "$*" >>"${BACKUP_TEST_LOG}"
 EOF
     chmod 700 "${bin}/docker"
     set +e
-    PATH="${bin}:/usr/bin:/bin" BACKUP_TEST_LOG="${log}" ZERO_TRUST_PROJECT_ROOT="${project}" \
+    PATH="${bin}:/usr/bin:/bin" BACKUP_TEST_LOG="${log}" NOOK_PROJECT_ROOT="${project}" \
         AGE_KEY="test-recipient" bash "${BACKUP}" "${output}" \
         >"${sandbox}/stdout" 2>"${sandbox}/stderr"
     rc=$?
@@ -142,7 +142,7 @@ if [[ -n ${output} ]]; then printf 'encrypted fixture\n' >"${output}"; else prin
 EOF
     chmod 700 "${bin}/docker" "${bin}/age"
     set +e
-    PATH="${bin}:${PATH}" BACKUP_TEST_LOG="${log}" ZERO_TRUST_PROJECT_ROOT="${project}" \
+    PATH="${bin}:${PATH}" BACKUP_TEST_LOG="${log}" NOOK_PROJECT_ROOT="${project}" \
         AGE_KEY="test-recipient" bash "${BACKUP}" "${output}" \
         >"${sandbox}/stdout" 2>"${sandbox}/stderr"
     rc=$?
@@ -152,7 +152,7 @@ EOF
     mode="$(stat -c '%a' "${output}.age")"
     [[ ${mode} == 600 ]] || fail "encrypted output mode was ${mode}"
     [[ $(stat -c '%h' "${output}.age") == 1 ]] || fail "encrypted output retained an extra hard link"
-    if find "${sandbox}" -maxdepth 1 -type f -name '.zt-backup.*' -print -quit | grep -q .; then
+    if find "${sandbox}" -maxdepth 1 -type f -name '.nook-backup.*' -print -quit | grep -q .; then
         fail "encrypted success left a private temporary file"
     fi
     grep -Fq "[OK] Backup written to ${output}.age " "${sandbox}/stdout" \
@@ -178,7 +178,7 @@ printf '%s\n' "$*" >>"${BACKUP_TEST_LOG}"
 EOF
     chmod 700 "${bin}/docker"
     set +e
-    PATH="${bin}:${PATH}" BACKUP_TEST_LOG="${log}" ZERO_TRUST_PROJECT_ROOT="${project}" \
+    PATH="${bin}:${PATH}" BACKUP_TEST_LOG="${log}" NOOK_PROJECT_ROOT="${project}" \
         bash "${BACKUP}" --allow-plaintext "${output}" \
         >"${sandbox}/stdout" 2>"${sandbox}/stderr"
     rc=$?
@@ -218,7 +218,7 @@ exec /usr/bin/tar "$@"
 EOF
     chmod 700 "${bin}/docker" "${bin}/tar"
     set +e
-    PATH="${bin}:${PATH}" BACKUP_TEST_LOG="${log}" ZERO_TRUST_PROJECT_ROOT="${project}" \
+    PATH="${bin}:${PATH}" BACKUP_TEST_LOG="${log}" NOOK_PROJECT_ROOT="${project}" \
         bash "${BACKUP}" --allow-plaintext "${output}" \
         >"${sandbox}/stdout" 2>"${sandbox}/stderr"
     rc=$?
@@ -264,7 +264,7 @@ exec /usr/bin/find "$@"
 EOF
     chmod 700 "${bin}/docker" "${bin}/age" "${bin}/ln" "${bin}/find"
     set +e
-    PATH="${bin}:${PATH}" BACKUP_TEST_LOG="${log}" ZERO_TRUST_PROJECT_ROOT="${project}" \
+    PATH="${bin}:${PATH}" BACKUP_TEST_LOG="${log}" NOOK_PROJECT_ROOT="${project}" \
         AGE_KEY="test-recipient" bash "${BACKUP}" "${output%.age}" \
         >"${sandbox}/stdout" 2>"${sandbox}/stderr"
     rc=$?
@@ -275,7 +275,7 @@ EOF
     grep -q '^publish collision$' "${log}" || fail "collision was not synchronized at publication"
     ! grep -q '^rotation$' "${log}" || fail "collision reached rotation"
     grep -q 'compose .* up -d --no-recreate$' "${log}" || fail "collision did not restart Compose"
-    if find "${sandbox}" -maxdepth 1 -type f -name '.zt-backup.*' -print -quit | grep -q .; then
+    if find "${sandbox}" -maxdepth 1 -type f -name '.nook-backup.*' -print -quit | grep -q .; then
         fail "collision left a partial output"
     fi
     rm -rf "${sandbox}"
@@ -305,7 +305,7 @@ exec /usr/bin/find "$@"
 EOF
     chmod 700 "${bin}/docker" "${bin}/find"
     set +e
-    PATH="${bin}:${PATH}" BACKUP_TEST_LOG="${log}" ZERO_TRUST_PROJECT_ROOT="${project}" \
+    PATH="${bin}:${PATH}" BACKUP_TEST_LOG="${log}" NOOK_PROJECT_ROOT="${project}" \
         bash "${BACKUP}" --allow-plaintext "${output}" \
         >"${sandbox}/stdout" 2>"${sandbox}/stderr"
     rc=$?
@@ -345,7 +345,7 @@ exit 72
 EOF
     chmod 700 "${bin}/docker" "${bin}/age"
     set +e
-    PATH="${bin}:${PATH}" BACKUP_TEST_LOG="${log}" ZERO_TRUST_PROJECT_ROOT="${project}" \
+    PATH="${bin}:${PATH}" BACKUP_TEST_LOG="${log}" NOOK_PROJECT_ROOT="${project}" \
         AGE_KEY="test-recipient" bash "${BACKUP}" "${output}" \
         >"${sandbox}/stdout" 2>"${sandbox}/stderr"
     rc=$?
@@ -354,7 +354,7 @@ EOF
     grep -q ' stop$' "${log}" || fail "encryption failure did not reach stop"
     grep -q ' up -d --no-recreate$' "${log}" || fail "encryption failure did not restart Compose"
     [[ ! -e "${output}" && ! -e "${output}.age" ]] || fail "encryption failure published output"
-    if find "${sandbox}" -maxdepth 1 -type f -name '.zt-backup.*' -print -quit | grep -q .; then
+    if find "${sandbox}" -maxdepth 1 -type f -name '.nook-backup.*' -print -quit | grep -q .; then
         fail "encryption failure left a partial output"
     fi
     rm -rf "${sandbox}"

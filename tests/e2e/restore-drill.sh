@@ -77,7 +77,7 @@ TARGET="${1:-sysadmin@127.0.0.1}"
 PORT="${2:-${QEMU_ADMIN_PORT:-2255}}"
 KEY="${3:-${TMP_DIR:-/tmp}/id_ed25519}"
 REMOTE_WORK="${RESTORE_DRILL_REMOTE_WORK:-/var/tmp/zt-restore-drill}"
-REMOTE_PROJECT_ROOT="${RESTORE_DRILL_PROJECT_ROOT:-/opt/zero-trust-vps}"
+REMOTE_PROJECT_ROOT="${RESTORE_DRILL_PROJECT_ROOT:-/opt/vps-nook}"
 DRILL_TIMEOUT="${RESTORE_DRILL_TIMEOUT:-600}"
 AGE_PREP_TIMEOUT="${RESTORE_DRILL_AGE_PREP_TIMEOUT:-420}"
 AGE_RUN_ID="$(openssl rand -hex 16)"
@@ -261,7 +261,7 @@ age-keygen -o "${work}/identity" >/dev/null 2>&1
 chmod 0600 "${work}/identity"
 install -m 0600 "${work}/identity" "${work}/restore-identity"
 recipient="$(age-keygen -y "${work}/identity")"
-env AGE_KEY="${recipient}" ZERO_TRUST_PROJECT_ROOT="${project}" \
+env AGE_KEY="${recipient}" NOOK_PROJECT_ROOT="${project}" \
     "${work}/backup.sh" "${work}/backup.tar.gz" >/dev/null
 archive="${work}/backup.tar.gz.age"
 test -s "${archive}"
@@ -276,7 +276,7 @@ else
 fi
 rm -f -- "${db}" "${ca}" "${override}"
 step=restore
-if ! env ZERO_TRUST_PROJECT_ROOT="${project}" \
+if ! env NOOK_PROJECT_ROOT="${project}" \
     "${work}/restore.sh" "${archive}" "${work}/restore-identity" \
     >"${work}/restore.out" 2>"${work}/restore.err"; then
     sed -n '1,20p' "${work}/restore.out" >&2

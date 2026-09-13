@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
-# Public installer for ansible-zero-trust-vps.
+# Public installer for vps-nook.
 # Recommended usage after verifying release bytes locally:
 #   sudo bash ./install.sh
 
 set -euo pipefail
 umask 077
 
-readonly OFFICIAL_REPO_URL="https://github.com/NikitaS2001/ansible-zero-trust-vps.git"
+readonly OFFICIAL_REPO_URL="https://github.com/NikitaS2001/vps-nook.git"
 # Release-preparation target: this tag is required only by the release gate.
-# Before the tag exists, source-tree tests must use explicit ZERO_TRUST_DEV_MODE=1.
-readonly OFFICIAL_RELEASE_REF="v1.3.2"
+# Before the tag exists, source-tree tests must use explicit NOOK_DEV_MODE=1.
+readonly OFFICIAL_RELEASE_REF="v2.0.0"
 readonly OFFICIAL_SIGNER_IDENTITY="nikitasmadych2001@gmail.com"
 readonly OFFICIAL_SIGNER_PUBLIC_KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILcfC1Stku7YQ0mLYptkX+t0SZiziyukPRofvs0YHZbx"
 readonly OFFICIAL_SIGNER_FINGERPRINT="SHA256:m1EbotpPqWJ2dAhml0iska2ToWgeflq3cIAgyq9qSP0"
-readonly INSTALL_ROOT="/opt/zero-trust-vps-installer"
+readonly INSTALL_ROOT="/opt/vps-nook-installer"
 readonly REPO_DIR="${INSTALL_ROOT}/repo"
 readonly VENV_DIR="${INSTALL_ROOT}/venv"
 readonly MIN_AVAILABLE_MEMORY_MIB=900
 
-VAULT_DIR="/etc/zero-trust-vps"
+VAULT_DIR="/etc/vps-nook"
 VAULT_PASS_FILE="${VAULT_DIR}/installer-vault.pass"
 VAULT_FILE="${VAULT_DIR}/installer-vault.yml"
 VAULT_MARKER="${VAULT_DIR}/.installer-vault.incomplete"
@@ -82,6 +82,13 @@ cleanup_on_failure() {
     if [[ "${exit_code}" -eq 0 ]]; then
         return
     fi
+    warn "Stopped during ${CURRENT_STAGE:-startup} (exit ${exit_code})."
+    if [[ -f ${VAULT_FILE} ]]; then
+        warn "Encrypted inputs remain at ${VAULT_DIR}. Rerun the same tagged installer after resolving the error."
+    else
+        warn "No complete installer vault is available. Review the error before starting again."
+    fi
+    warn "Host-wide rollback is not implied; keep the original SSH session open."
 
     if [[ "${CREATED_REPO_DIR}" == "true" && "${CREATED_INSTALL_ROOT}" != "true" ]]; then
         warn "Installation failed. Removing partial repository checkout at ${REPO_DIR}."
@@ -146,39 +153,40 @@ Verify the release assets locally, then run:
 
   sudo bash ./install.sh
 
-Interactive public installer for ansible-zero-trust-vps.
+Interactive public installer for VPS Nook.
 
 Production mode accepts only:
-  https://github.com/NikitaS2001/ansible-zero-trust-vps.git at v1.3.2
+  https://github.com/NikitaS2001/vps-nook.git at v2.0.0
   Its annotated SSH-signed tag must match nikitasmadych2001@gmail.com
   (SHA256:m1EbotpPqWJ2dAhml0iska2ToWgeflq3cIAgyq9qSP0). The installer peels
   it to an exact SHA, detaches the checkout, and passes that SHA to ansible-pull.
 
 Development-only source override (never production):
-  ZERO_TRUST_DEV_MODE=1   Enables ZERO_TRUST_REPO_URL and ZERO_TRUST_RELEASE_REF
+  NOOK_DEV_MODE=1   Enables NOOK_REPO_URL and NOOK_RELEASE_REF
                           and emits NON-PRODUCTION DEVELOPMENT MODE.
 
-Trust boundary: verify the tagged release asset attestation and checksum before
+Quick installation trusts the HTTPS source of the executed script. For
+pre-execution verification, verify the tagged release asset attestation and checksum before
 executing it. The installer independently verifies the SSH-signed tag and exact
 resolved SHA. Temporary signer and secret files are removed after success or failure.
 
 Non-interactive mode for automated testing:
-  ZERO_TRUST_NONINTERACTIVE=1  Run without prompts. A fresh installation needs
-                               the required ZERO_TRUST_* inputs below.
-  ZERO_TRUST_SSH_PORT          Hardened SSH port (optional, default from role)
-  ZERO_TRUST_WG_PORT           WireGuard UDP port (optional, default from role)
-  ZERO_TRUST_ADMIN_USER        Admin username (optional, default from role)
-  ZERO_TRUST_ADMIN_PASSWORD    Admin password (required, min 8 chars)
-  ZERO_TRUST_ADGUARD_PASSWORD  AdGuard admin password (required, min 8 chars)
-  ZERO_TRUST_WG_PASSWORD       WireGuard panel password (required, min 12 chars)
-  ZERO_TRUST_INTERNAL_DOMAINS  Two internal hostnames, space separated
-  ZERO_TRUST_INTERNAL_DOMAIN_SUFFIX  Local DNS suffix for the internal domains
+  NOOK_NONINTERACTIVE=1  Run without prompts. A fresh installation needs
+                               the required NOOK_* inputs below.
+  NOOK_SSH_PORT          Hardened SSH port (optional, default from role)
+  NOOK_WG_PORT           WireGuard UDP port (optional, default from role)
+  NOOK_ADMIN_USER        Admin username (optional, default from role)
+  NOOK_ADMIN_PASSWORD    Admin password (required, min 8 chars)
+  NOOK_ADGUARD_PASSWORD  AdGuard admin password (required, min 8 chars)
+  NOOK_WG_PASSWORD       WireGuard panel password (required, min 12 chars)
+  NOOK_INTERNAL_DOMAINS  Two internal hostnames, space separated
+  NOOK_INTERNAL_DOMAIN_SUFFIX  Local DNS suffix for the internal domains
                                (optional, default internal; recommended
                                .internal or .home.arpa)
-  ZERO_TRUST_SSH_PUBKEY        SSH public key for the admin user (required)
-  ZERO_TRUST_WG_HOST           Public hostname/IP for clients (optional,
+  NOOK_SSH_PUBKEY        SSH public key for the admin user (required)
+  NOOK_WG_HOST           Public hostname/IP for clients (optional,
                                auto-detected when omitted)
-  ZERO_TRUST_WG_TRAFFIC_MODE   VPN routing: services or full
+  NOOK_WG_TRAFFIC_MODE   VPN routing: services or full
                           (optional, default services)
 
 On rerun, the encrypted installer state is authoritative. Omit credential
@@ -192,10 +200,58 @@ The public quickstart should use a tagged release, never main.
 EOF
 }
 
-info() { echo "[INFO]  $*"; }
-warn() { echo "[WARN]  $*" >&2; }
+CURRENT_STAGE="Startup"
+STAGE_STARTED=0
+UI_ACCENT=""
+UI_RESET=""
+UI_OK=""
+UI_WARN=""
+UI_ERROR=""
+
+init_ui() {
+    if [[ -t 1 && -t 2 && ${TERM:-dumb} != dumb && ! ${NO_COLOR+x} ]]; then
+        UI_ACCENT=$'\033[36m'
+        UI_OK=$'\033[32m'
+        UI_WARN=$'\033[33m'
+        UI_ERROR=$'\033[31m'
+        UI_RESET=$'\033[0m'
+    fi
+}
+
+stage() {
+    if (( STAGE_STARTED > 0 )); then
+        printf '  Previous stage: %ss\n' "$((SECONDS - STAGE_STARTED))"
+    fi
+    CURRENT_STAGE="$1"
+    STAGE_STARTED=$SECONDS
+    printf '\n%s  %s%s\n\n' "${UI_ACCENT}" "${CURRENT_STAGE}" "${UI_RESET}"
+}
+
+reject_legacy_inputs() {
+    local name legacy_path
+    for name in "${!ZERO_TRUST_@}"; do
+        [[ -n ${name} ]] || continue
+        case "${name}" in
+            ZERO_TRUST_WG_ENABLE_IPV6|ZERO_TRUST_WG_EASY_ADMIN_PASSWORD)
+                error "${name} was removed. See docs/configuration.md for supported NOOK_* inputs." ;;
+            *) error "${name} is no longer accepted. Use NOOK_${name#ZERO_TRUST_} instead (value not shown)." ;;
+        esac
+    done
+    for legacy_path in /opt/zero-trust-vps /opt/zero-trust-vps-installer /etc/zero-trust-vps /opt/zt-backups; do
+        if [[ -e ${legacy_path} || -L ${legacy_path} ]]; then
+            error "Legacy installation found at ${legacy_path}. VPS Nook v2 requires a fresh VPS; see UPGRADE.md. No migration was attempted."
+        fi
+    done
+}
+
+require_tun() {
+    [[ -c /dev/net/tun ]] || error "/dev/net/tun is unavailable. Enable TUN in the VPS provider settings before retrying."
+}
+
+info() { printf '%s[INFO]%s  %s\n' "${UI_OK}" "${UI_RESET}" "$*"; }
+warn() { printf '%s[WARN]%s  %s\n' "${UI_WARN}" "${UI_RESET}" "$*" >&2; }
 error() {
-    echo "[ERROR] $*" >&2
+    printf '%s[ERROR]%s %s\n' "${UI_ERROR}" "${UI_RESET}" "$*" >&2
     exit 1
 }
 
@@ -264,7 +320,7 @@ report_existing_swap() {
 validate_traffic_mode() {
     case "${WG_TRAFFIC_MODE}" in
         services|full) ;;
-        *) error "ZERO_TRUST_WG_TRAFFIC_MODE must be services or full." ;;
+        *) error "NOOK_WG_TRAFFIC_MODE must be services or full." ;;
     esac
 }
 
@@ -278,17 +334,7 @@ open_tty() {
     if [[ ! -r /dev/tty ]]; then
         error "Interactive installation requires a TTY. SSH into the VPS and run the installer from a terminal."
     fi
-    exec 3<>/dev/tty || error "Failed to open /dev/tty for interactive prompts."
-}
-
-prompt_optional() {
-    local __var_name="$1"
-    local prompt_text="$2"
-    local value
-
-    printf "%s (Enter for role default): " "${prompt_text}" >&3
-    IFS= read -r value <&3
-    printf -v "${__var_name}" '%s' "${value}"
+    { exec 3<>/dev/tty; } 2>/dev/null || error "Interactive installation requires a TTY. Use an SSH terminal or NOOK_NONINTERACTIVE=1."
 }
 
 prompt_choice() {
@@ -297,8 +343,12 @@ prompt_choice() {
     local default_value="$3"
     local value
 
-    printf '%s [%s]: ' "${prompt_text}" "${default_value}" >&3
-    IFS= read -r value <&3
+    if [[ -n ${default_value} ]]; then
+        printf '%s [%s]: ' "${prompt_text}" "${default_value}" >&3
+    else
+        printf '%s: ' "${prompt_text}" >&3
+    fi
+    IFS= read -r value <&3 || error "Input closed; installation cancelled."
     printf -v "${__var_name}" '%s' "${value:-${default_value}}"
 }
 
@@ -307,17 +357,24 @@ prompt_required_secret() {
     local prompt_text="$2"
     local value
     local confirmation
+    local minimum="${3:-8}"
+    local maximum="${4:-4096}"
 
+    if (( maximum <= 72 )); then
+        printf '  Use at least %s characters, at most %s UTF-8 bytes. Input is hidden.\n' "${minimum}" "${maximum}" >&3
+    else
+        printf '  Use at least %s characters. Input is hidden.\n' "${minimum}" >&3
+    fi
     while true; do
         printf "%s: " "${prompt_text}" >&3
-        IFS= read -r -s value <&3
+        IFS= read -r -s value <&3 || error "Input closed; installation cancelled."
         printf "\n" >&3
-        if [[ "${#value}" -lt 8 ]]; then
-            warn "Value must be at least 8 characters."
+        if [[ "${#value}" -lt ${minimum} ]] || ! secret_fits_byte_limit "${value}" "${maximum}"; then
+            warn "Use at least ${minimum} characters and at most ${maximum} UTF-8 bytes."
             continue
         fi
         printf "Confirm %s: " "${prompt_text}" >&3
-        IFS= read -r -s confirmation <&3
+        IFS= read -r -s confirmation <&3 || error "Input closed; installation cancelled."
         printf "\n" >&3
         if [[ "${value}" != "${confirmation}" ]]; then
             warn "Values did not match. Try again."
@@ -335,7 +392,7 @@ prompt_required_line() {
 
     while true; do
         printf "%s: " "${prompt_text}" >&3
-        IFS= read -r value <&3
+        IFS= read -r value <&3 || error "Input closed; installation cancelled."
         value="${value#"${value%%[![:space:]]*}"}"
         value="${value%"${value##*[![:space:]]}"}"
         if [[ -z "${value}" ]]; then
@@ -354,7 +411,7 @@ validate_port() {
     if [[ -z "${value}" ]]; then
         return 0
     fi
-    if ! [[ "${value}" =~ ^[0-9]+$ ]] || [[ "${value}" -lt 1 ]] || [[ "${value}" -gt 65535 ]]; then
+    if ! [[ "${value}" =~ ^[0-9]{1,5}$ ]] || (( 10#${value} < 1 || 10#${value} > 65535 )); then
         error "${label} must be a number between 1 and 65535. Got: ${value}"
     fi
 }
@@ -375,7 +432,7 @@ validate_hostname() {
     local label
     local -a labels
 
-    if [[ "${#value}" -gt 253 || "${value}" == .* || "${value}" == *. ]]; then
+    if [[ -z "${value}" || "${#value}" -gt 253 || "${value}" == .* || "${value}" == *. ]]; then
         return 1
     fi
     IFS=. read -r -a labels <<<"${value}"
@@ -404,6 +461,7 @@ validate_internal_domains() {
     validate_hostname "${internal_domains[0]}" || error "Invalid internal hostname: ${internal_domains[0]}"
     validate_hostname "${internal_domains[1]}" || error "Invalid internal hostname: ${internal_domains[1]}"
 
+    [[ ${internal_domains[0]} != "${internal_domains[1]}" ]] || error "Use two distinct internal domains."
     WG_INTERNAL_DOMAIN="${internal_domains[0]}"
     ADGUARD_INTERNAL_DOMAIN="${internal_domains[1]}"
 }
@@ -462,11 +520,11 @@ read_yaml_scalar_default() {
 }
 
 validate_release_source() {
-    case "${ZERO_TRUST_DEV_MODE:-}" in
+    case "${NOOK_DEV_MODE:-}" in
         '')
             DEVELOPMENT_MODE=false
-            REPO_URL="${ZERO_TRUST_REPO_URL:-${OFFICIAL_REPO_URL}}"
-            RELEASE_REF="${ZERO_TRUST_RELEASE_REF:-${OFFICIAL_RELEASE_REF}}"
+            REPO_URL="${NOOK_REPO_URL:-${OFFICIAL_REPO_URL}}"
+            RELEASE_REF="${NOOK_RELEASE_REF:-${OFFICIAL_RELEASE_REF}}"
             [[ "${REPO_URL}" == "${OFFICIAL_REPO_URL}" ]] \
                 || error "Production mode accepts only the official repository: ${OFFICIAL_REPO_URL}"
             [[ "${RELEASE_REF}" == "${OFFICIAL_RELEASE_REF}" ]] \
@@ -474,22 +532,22 @@ validate_release_source() {
             ;;
         1)
             DEVELOPMENT_MODE=true
-            REPO_URL="${ZERO_TRUST_REPO_URL:-${OFFICIAL_REPO_URL}}"
-            RELEASE_REF="${ZERO_TRUST_RELEASE_REF:-${OFFICIAL_RELEASE_REF}}"
+            REPO_URL="${NOOK_REPO_URL:-${OFFICIAL_REPO_URL}}"
+            RELEASE_REF="${NOOK_RELEASE_REF:-${OFFICIAL_RELEASE_REF}}"
             warn "NON-PRODUCTION DEVELOPMENT MODE: arbitrary repository and ref enabled."
             ;;
         *)
-            error "ZERO_TRUST_DEV_MODE must be unset or exactly 1."
+            error "NOOK_DEV_MODE must be unset or exactly 1."
             ;;
     esac
     if [[ -z "${REPO_URL}" || "${REPO_URL}" =~ [[:space:]] || "${REPO_URL}" == -* ]]; then
-        error "ZERO_TRUST_REPO_URL must be a non-empty git URL without whitespace."
+        error "NOOK_REPO_URL must be a non-empty git URL without whitespace."
     fi
     if [[ -z "${RELEASE_REF}" || "${RELEASE_REF}" == -* || ! "${RELEASE_REF}" =~ ^[A-Za-z0-9._/@+-]+$ ]]; then
-        error "ZERO_TRUST_RELEASE_REF must be a non-empty git ref using only letters, numbers, '.', '_', '/', '@', '+', or '-'."
+        error "NOOK_RELEASE_REF must be a non-empty git ref using only letters, numbers, '.', '_', '/', '@', '+', or '-'."
     fi
     if [[ "${RELEASE_REF}" == *..* || "${RELEASE_REF}" == *@\{* || "${RELEASE_REF}" == *.lock || "${RELEASE_REF}" == */ || "${RELEASE_REF}" == /* ]]; then
-        error "ZERO_TRUST_RELEASE_REF is not a safe git ref: ${RELEASE_REF}"
+        error "NOOK_RELEASE_REF is not a safe git ref: ${RELEASE_REF}"
     fi
 }
 
@@ -667,43 +725,134 @@ install_collections() {
     "${VENV_DIR}/bin/ansible-galaxy" collection install -r "${REPO_DIR}/requirements.yml" --force
 }
 
+# Validators run in a subshell so an invalid field does not end the wizard.
+prompt_validated() {
+    local target="$1" label="$2" fallback="$3"
+    shift 3
+    local candidate
+    while true; do
+        prompt_choice candidate "${label}" "${fallback}"
+        if ( "$@" "${candidate}" ); then
+            printf -v "${target}" '%s' "${candidate}"
+            return
+        fi
+        warn "Please correct this field."
+    done
+}
+
+validate_endpoint() {
+    if [[ -z $1 ]] || ! validate_hostname "$1"; then
+        error "Enter a hostname or IPv4 address."
+    fi
+}
+
+validate_domain_pair() {
+    validate_internal_domains "$1"
+    [[ ${WG_INTERNAL_DOMAIN} != "${ADGUARD_INTERNAL_DOMAIN}" ]] || error "Use two distinct internal domains."
+    validate_internal_domain_suffix "${INTERNAL_DOMAIN_SUFFIX}" "$1"
+}
+
+choose_traffic_mode() {
+    local selection
+    printf '\n  1  Private services only [default]\n     Reach your private DNS and HTTPS services.\n'
+    printf '  2  All internet traffic\n     Route internet traffic through this VPS.\n'
+    printf '     IPv6 stays outside the VPN if the VPS has no IPv6 egress.\n\n'
+    while true; do
+        prompt_choice selection "VPN purpose (1 or 2)" "$([[ ${WG_TRAFFIC_MODE} == full ]] && echo 2 || echo 1)"
+        case "${selection}" in
+            1) WG_TRAFFIC_MODE=services; break ;;
+            2) WG_TRAFFIC_MODE=full; break ;;
+            *) warn "Choose 1 or 2." ;;
+        esac
+    done
+    WG_TRAFFIC_MODE_INPUT="${WG_TRAFFIC_MODE}"
+}
+
+advanced_configuration() {
+    local previous_suffix="${INTERNAL_DOMAIN_SUFFIX}"
+    prompt_validated SSH_PORT "SSH port" "${SSH_PORT}" validate_port "SSH port"
+    prompt_validated WG_PORT "WireGuard UDP port" "${WG_PORT}" validate_port "WireGuard port"
+    prompt_validated ADMIN_USER "Administrator username" "${ADMIN_USER}" validate_optional_admin_user
+    prompt_validated INTERNAL_DOMAIN_SUFFIX "Internal DNS suffix" "${INTERNAL_DOMAIN_SUFFIX}" validate_endpoint
+    if [[ ${INTERNAL_DOMAIN_SUFFIX} != "${previous_suffix}" ]]; then
+        INTERNAL_DOMAINS="wg.${INTERNAL_DOMAIN_SUFFIX} adguard.${INTERNAL_DOMAIN_SUFFIX}"
+    fi
+    prompt_validated INTERNAL_DOMAINS "Internal domains (wg-easy, AdGuard)" "${INTERNAL_DOMAINS}" validate_domain_pair
+    validate_internal_domains "${INTERNAL_DOMAINS}"
+}
+
+confirm_configuration() {
+    local action field
+    while true; do
+        printf '\n  Ready to install\n\n'
+        printf '  Release        %s\n  VPN mode       %s\n  Endpoint       %s\n' "${RELEASE_REF}" "${WG_TRAFFIC_MODE}" "${WG_HOST}"
+        printf '  Administrator  %s\n  SSH            TCP %s\n  WireGuard      UDP %s\n' "${ADMIN_USER}" "${SSH_PORT}" "${WG_PORT}"
+        printf '  Internal sites %s\n\n' "${INTERNAL_DOMAINS}"
+        warn "Open these ports in your provider firewall. Keep this SSH session and provider console access available."
+        prompt_choice action "Install, edit, or cancel (i/e/c)" c
+        case "${action}" in
+            i|I) return ;;
+            e|E)
+                if [[ ${REUSE_INSTALLER_STATE} == true ]]; then
+                    warn "Saved configuration is immutable on rerun. Cancel and follow the configuration guide to change it."
+                    continue
+                fi
+                printf '\n  1 VPN mode   2 Endpoint   3 SSH key   4 Admin password\n'
+                printf '  5 AdGuard password   6 WireGuard password   7 Advanced settings\n'
+                prompt_choice field "Field to edit" 1
+                case "${field}" in
+                    1) choose_traffic_mode ;;
+                    2) prompt_validated WG_HOST "Public endpoint" "${WG_HOST}" validate_endpoint ;;
+                    3) prompt_validated SSH_PUBKEY "SSH public key" "${SSH_PUBKEY}" validate_ssh_pubkey ;;
+                    4) prompt_required_secret ADMIN_PASSWORD "Administrator account password" 8 ;;
+                    5) prompt_required_secret ADGUARD_PASSWORD "AdGuard password" 8 72 ;;
+                    6) prompt_required_secret WG_PASSWORD "WireGuard panel password" 12 ;;
+                    7) advanced_configuration ;;
+                    *) warn "Choose a field from 1 to 7." ;;
+                esac
+                ;;
+            c|C) warn "Cancelled. Server roles were not applied; source-verification packages may remain installed."; exit 130 ;;
+            *) warn "Choose i, e, or c." ;;
+        esac
+    done
+}
+
 collect_configuration() {
-    if [[ -n "${ZERO_TRUST_WG_ENABLE_IPV6:-}" ]]; then
-        error "ZERO_TRUST_WG_ENABLE_IPV6 is no longer accepted. IPv6 full-tunnel routing is enabled automatically when host IPv6 egress is available."
+    if [[ -n "${NOOK_WG_ENABLE_IPV6:-}" ]]; then
+        error "NOOK_WG_ENABLE_IPV6 is no longer accepted. IPv6 full-tunnel routing is enabled automatically when host IPv6 egress is available."
     fi
     if [[ "${NONINTERACTIVE}" == "1" ]]; then
         collect_configuration_noninteractive
         return
     fi
 
-    info "Starting interactive configuration..."
-    prompt_choice WG_TRAFFIC_MODE "VPN traffic mode (services or full)" services
-    WG_TRAFFIC_MODE_INPUT="${WG_TRAFFIC_MODE}"
-    prompt_optional SSH_PORT "SSH port"
-    prompt_optional WG_PORT "WireGuard port"
-    prompt_optional ADMIN_USER "Admin username"
-    prompt_required_secret ADMIN_PASSWORD "Admin password (min 8 chars)"
-    prompt_required_secret ADGUARD_PASSWORD "AdGuard admin password (min 8 chars)"
-    prompt_required_secret WG_PASSWORD "WireGuard panel password (min 12 chars)"
-    prompt_optional INTERNAL_DOMAINS "Internal domains, separated by space"
-    prompt_optional INTERNAL_DOMAIN_SUFFIX "Internal domain suffix (Enter for role default: internal)"
-    prompt_optional WG_HOST "WireGuard public hostname or IP (Enter to auto-detect)"
-    prompt_required_line SSH_PUBKEY "SSH public key"
+    stage "Step 1 of 4 - Network"
+    choose_traffic_mode
+    WG_HOST="$(detect_public_ip)"
+    prompt_validated WG_HOST "Public WireGuard hostname or IPv4" "${WG_HOST}" validate_endpoint
+    resolve_effective_installer_inputs
 
-    require_max_length "${ADGUARD_PASSWORD}" "AdGuard admin password" 72
-    # wg-easy v15 requires at least 12 characters for the panel password at login.
-    require_min_length "${WG_PASSWORD}" "WireGuard panel password" 12
+    stage "Step 2 of 4 - Access"
+    info "Use the public key from your computer, never its private key."
+    prompt_validated SSH_PUBKEY "SSH public key" "" validate_ssh_pubkey
+    info "SSH uses your key. This password is for local account access; sudo is configured without a password."
+    prompt_required_secret ADMIN_PASSWORD "Administrator account password" 8
+    info "Choose separate passwords for DNS administration and VPN client management."
+    prompt_required_secret ADGUARD_PASSWORD "AdGuard password" 8 72
+    prompt_required_secret WG_PASSWORD "WireGuard panel password" 12
 
-    validate_port "SSH port" "${SSH_PORT}"
-    validate_traffic_mode
-    validate_port "WireGuard port" "${WG_PORT}"
-    validate_optional_admin_user "${ADMIN_USER}"
-    validate_internal_domains "${INTERNAL_DOMAINS}"
-    validate_internal_domain_suffix "${INTERNAL_DOMAIN_SUFFIX}" "${INTERNAL_DOMAINS}"
-    [[ -z "${SSH_PUBKEY}" ]] || validate_ssh_pubkey "${SSH_PUBKEY}"
-    if [[ -n "${WG_HOST}" ]] && ! validate_hostname "${WG_HOST}"; then
-        error "Invalid public hostname or IP for WireGuard clients: ${WG_HOST}"
-    fi
+    stage "Step 3 of 4 - Settings"
+    local advanced
+    while true; do
+        prompt_choice advanced "Customize ports, username, or internal domains? (y/n)" n
+        case "${advanced}" in
+            y|Y) advanced_configuration; break ;;
+            n|N) break ;;
+            *) warn "Choose y or n." ;;
+        esac
+    done
+    stage "Step 4 of 4 - Review"
+    confirm_configuration
 }
 
 require_min_length() {
@@ -716,13 +865,18 @@ require_min_length() {
     fi
 }
 
+secret_fits_byte_limit() {
+    local LC_ALL=C
+    [[ ${#1} -le $2 ]]
+}
+
 require_max_length() {
     local value="$1"
     local label="$2"
     local max="$3"
 
-    if [[ "${#value}" -gt "${max}" ]]; then
-        error "${label} must be at most ${max} characters (bcrypt limit)."
+    if ! secret_fits_byte_limit "${value}" "${max}"; then
+        error "${label} must be at most ${max} UTF-8 bytes (bcrypt limit)."
     fi
 }
 
@@ -740,21 +894,21 @@ detect_public_ip() {
 }
 
 collect_configuration_noninteractive() {
-    if [[ -n "${ZERO_TRUST_WG_EASY_ADMIN_PASSWORD:-}" ]]; then
-        error "ZERO_TRUST_WG_EASY_ADMIN_PASSWORD is no longer accepted. Use ZERO_TRUST_WG_PASSWORD; it is persisted only in the encrypted installer vault."
+    if [[ -n "${NOOK_WG_EASY_ADMIN_PASSWORD:-}" ]]; then
+        error "NOOK_WG_EASY_ADMIN_PASSWORD is no longer accepted. Use NOOK_WG_PASSWORD; it is persisted only in the encrypted installer vault."
     fi
-    WG_TRAFFIC_MODE_INPUT="${ZERO_TRUST_WG_TRAFFIC_MODE:-}"
+    WG_TRAFFIC_MODE_INPUT="${NOOK_WG_TRAFFIC_MODE:-}"
     WG_TRAFFIC_MODE="${WG_TRAFFIC_MODE_INPUT:-services}"
-    SSH_PORT="${ZERO_TRUST_SSH_PORT:-}"
-    WG_PORT="${ZERO_TRUST_WG_PORT:-}"
-    ADMIN_USER="${ZERO_TRUST_ADMIN_USER:-}"
+    SSH_PORT="${NOOK_SSH_PORT:-}"
+    WG_PORT="${NOOK_WG_PORT:-}"
+    ADMIN_USER="${NOOK_ADMIN_USER:-}"
     ADMIN_PASSWORD="${INHERITED_ADMIN_PASSWORD}"
     ADGUARD_PASSWORD="${INHERITED_ADGUARD_PASSWORD}"
     WG_PASSWORD="${INHERITED_WG_PASSWORD}"
-    INTERNAL_DOMAINS="${ZERO_TRUST_INTERNAL_DOMAINS:-}"
-    INTERNAL_DOMAIN_SUFFIX="${ZERO_TRUST_INTERNAL_DOMAIN_SUFFIX:-}"
+    INTERNAL_DOMAINS="${NOOK_INTERNAL_DOMAINS:-}"
+    INTERNAL_DOMAIN_SUFFIX="${NOOK_INTERNAL_DOMAIN_SUFFIX:-}"
     SSH_PUBKEY="${INHERITED_SSH_PUBKEY}"
-    WG_HOST="${ZERO_TRUST_WG_HOST:-}"
+    WG_HOST="${NOOK_WG_HOST:-}"
 
     local missing=""
     local var
@@ -762,7 +916,7 @@ collect_configuration_noninteractive() {
         && ( ! -f "${VAULT_PASS_FILE}" || ! -f "${VAULT_FILE}" ) ]]; then
         for var in ADMIN_PASSWORD ADGUARD_PASSWORD WG_PASSWORD SSH_PUBKEY; do
             if [[ -z "${!var}" ]]; then
-                missing="${missing} ZERO_TRUST_${var}"
+                missing="${missing} NOOK_${var}"
             fi
         done
     fi
@@ -811,7 +965,7 @@ resolve_wg_host() {
     WG_HOST="$(detect_public_ip)"
     if [[ -z "${WG_HOST}" ]]; then
         if [[ "${NONINTERACTIVE}" == "1" ]]; then
-            error "Could not auto-detect the public IP. Set ZERO_TRUST_WG_HOST."
+            error "Could not auto-detect the public IP. Set NOOK_WG_HOST."
         fi
         prompt_required_line WG_HOST "WireGuard public hostname or IP"
     fi
@@ -1047,7 +1201,7 @@ acquire_installer_lock() {
             || error "Installer operation lock is not a private owner-controlled regular file."
     fi
     exec {VAULT_LOCK_FD}>"${VAULT_LOCK_FILE}"
-    flock -n "${VAULT_LOCK_FD}" || error "Another zero-trust installer operation is active."
+    flock -n "${VAULT_LOCK_FD}" || error "Another VPS Nook installer operation is active."
     chown "${VAULT_OWNER}:${VAULT_OWNER}" "${VAULT_LOCK_FILE}"
     chmod 0600 "${VAULT_LOCK_FILE}"
 }
@@ -1188,57 +1342,57 @@ run_ansible_pull() {
 }
 
 print_summary() {
-    local summary_ssh_port="${SSH_PORT:-$(read_yaml_scalar_default "${REPO_DIR}/roles/vps_hardening/defaults/main.yml" ssh_port)}"
-    local summary_admin_user="${ADMIN_USER:-$(read_yaml_scalar_default "${REPO_DIR}/roles/vps_hardening/defaults/main.yml" admin_user)}"
-    local summary_domain_suffix="${INTERNAL_DOMAIN_SUFFIX:-$(read_yaml_scalar_default "${REPO_DIR}/roles/vps_orchestration/defaults/main.yml" internal_domain_suffix)}"
-    local summary_wg_domain="${WG_INTERNAL_DOMAIN:-wg.${summary_domain_suffix}}"
-    local summary_adguard_domain="${ADGUARD_INTERNAL_DOMAIN:-adguard.${summary_domain_suffix}}"
-    local summary_wg_ui_port
-    local summary_adguard_ui_port
-    local summary_wg_port="${WG_PORT:-$(read_yaml_scalar_default "${REPO_DIR}/roles/vps_orchestration/defaults/main.yml" wg_port)}"
-    local summary_wg_host="${WG_HOST:-<vps-ip>}"
-
-    summary_wg_ui_port="$(read_yaml_scalar_default "${REPO_DIR}/roles/vps_hardening/defaults/main.yml" wg_easy_bootstrap_ui_port)"
-    summary_adguard_ui_port="$(read_yaml_scalar_default "${REPO_DIR}/roles/vps_hardening/defaults/main.yml" adguard_bootstrap_ui_port)"
-
+    local ssh_host='<vps-address>' server_addr
+    local -a connection_fields
+    if [[ -n ${SSH_CONNECTION:-} ]]; then
+        read -r -a connection_fields <<<"${SSH_CONNECTION}"
+        server_addr="${connection_fields[2]:-}"
+        if [[ ${server_addr} =~ ^[0-9a-fA-F:.]+$ ]]; then
+            ssh_host="${server_addr}"
+        fi
+    fi
+    local ui_port
+    ui_port="$(read_yaml_scalar_default "${REPO_DIR}/roles/vps_hardening/defaults/main.yml" wg_easy_bootstrap_ui_port)"
+    stage "Installation complete - Connect your first client"
     cat <<EOF
+  1. On your computer, verify a NEW SSH login and keep this session open:
 
-================================================================================
-                         DEPLOYMENT COMPLETE
-================================================================================
+     ssh -p ${SSH_PORT} ${ADMIN_USER}@${ssh_host}
 
-Open an SSH tunnel to reach the wg-easy panel and finish first-client setup:
+  2. On your computer, open the WireGuard panel tunnel:
 
-  ssh -p ${summary_ssh_port} -L ${summary_wg_ui_port}:127.0.0.1:${summary_wg_ui_port} ${summary_admin_user}@<vps-ip>
+     ssh -p ${SSH_PORT} -L ${ui_port}:127.0.0.1:${ui_port} ${ADMIN_USER}@${ssh_host}
 
-Then log in to http://127.0.0.1:${summary_wg_ui_port} with the WireGuard panel
-password you entered during installation, create a client, and connect.
+     Open http://127.0.0.1:${ui_port} and sign in with your WireGuard panel password.
+     Create a client, import its profile into WireGuard, then connect.
+     VPN endpoint: ${WG_HOST}:${WG_PORT} (UDP); mode: ${WG_TRAFFIC_MODE}.
 
-  VPN endpoint for clients: ${summary_wg_host}:${summary_wg_port} (UDP)
+  3. Trust the Caddy root CA on your computer or phone:
 
-For AdGuard, use the second tunnel when needed:
+     Server copy: ${REPO_DIR}/fetched_certs/localhost/root.crt
+     Instructions: https://github.com/NikitaS2001/vps-nook/blob/${RELEASE_REF}/docs/getting-started.md#trust-the-internal-ca
 
-  ssh -p ${summary_ssh_port} -L ${summary_adguard_ui_port}:127.0.0.1:${summary_adguard_ui_port} ${summary_admin_user}@<vps-ip>
+  4. With the VPN connected, check both sites:
 
-After connecting to the VPN, use the internal domains:
+     https://${WG_INTERNAL_DOMAIN}
+     https://${ADGUARD_INTERNAL_DOMAIN}
 
-  https://${summary_wg_domain}
-  https://${summary_adguard_domain}
+  Health check on the VPS:
+     sudo ${REPO_DIR}/scripts/synthetic-check.sh
 
-================================================================================
-
+  Local checks cannot prove a new remote SSH login. Verify step 1 before disconnecting.
 EOF
 }
 
 main() {
     export -n ADMIN_PASSWORD ADGUARD_PASSWORD WG_PASSWORD SSH_PUBKEY 2>/dev/null || true
     export -n INHERITED_ADMIN_PASSWORD INHERITED_ADGUARD_PASSWORD INHERITED_WG_PASSWORD INHERITED_SSH_PUBKEY 2>/dev/null || true
-    INHERITED_ADMIN_PASSWORD="${ZERO_TRUST_ADMIN_PASSWORD:-}"
-    INHERITED_ADGUARD_PASSWORD="${ZERO_TRUST_ADGUARD_PASSWORD:-}"
-    INHERITED_WG_PASSWORD="${ZERO_TRUST_WG_PASSWORD:-}"
-    INHERITED_SSH_PUBKEY="${ZERO_TRUST_SSH_PUBKEY:-}"
-    export -n ZERO_TRUST_ADMIN_PASSWORD ZERO_TRUST_ADGUARD_PASSWORD ZERO_TRUST_WG_PASSWORD ZERO_TRUST_SSH_PUBKEY 2>/dev/null || true
-    unset ZERO_TRUST_ADMIN_PASSWORD ZERO_TRUST_ADGUARD_PASSWORD ZERO_TRUST_WG_PASSWORD ZERO_TRUST_SSH_PUBKEY
+    INHERITED_ADMIN_PASSWORD="${NOOK_ADMIN_PASSWORD:-}"
+    INHERITED_ADGUARD_PASSWORD="${NOOK_ADGUARD_PASSWORD:-}"
+    INHERITED_WG_PASSWORD="${NOOK_WG_PASSWORD:-}"
+    INHERITED_SSH_PUBKEY="${NOOK_SSH_PUBKEY:-}"
+    export -n NOOK_ADMIN_PASSWORD NOOK_ADGUARD_PASSWORD NOOK_WG_PASSWORD NOOK_SSH_PUBKEY 2>/dev/null || true
+    unset NOOK_ADMIN_PASSWORD NOOK_ADGUARD_PASSWORD NOOK_WG_PASSWORD NOOK_SSH_PUBKEY
 
     if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
         usage
@@ -1248,7 +1402,12 @@ main() {
         error "Unknown option: $1. Use --help for usage."
     fi
 
-    NONINTERACTIVE="${ZERO_TRUST_NONINTERACTIVE:-0}"
+    init_ui
+    reject_legacy_inputs
+    NONINTERACTIVE="${NOOK_NONINTERACTIVE:-0}"
+    [[ ${NONINTERACTIVE} == 0 || ${NONINTERACTIVE} == 1 ]] || error "NOOK_NONINTERACTIVE must be 0 or 1."
+    printf '\n%s  VPS NOOK%s\n  Your private network, on your server.\n' "${UI_ACCENT}" "${UI_RESET}"
+    stage "Checking server"
 
     # A fresh Debian/Ubuntu VPS usually only has C.UTF-8 generated, while the
     # SSH session forwards the caller's locale (e.g. ru_RU.UTF-8). Ansible
@@ -1262,24 +1421,41 @@ main() {
     require_supported_os
     require_supported_platform
     require_minimum_memory
+    require_tun
     report_existing_swap
+    info "System: ${PRETTY_NAME:-supported Linux}; memory: $(available_memory_mib) MiB; target: ${RELEASE_REF}"
+    if [[ "${NONINTERACTIVE}" != 1 ]]; then
+        open_tty
+    fi
     if installer_state_paths_present; then
         REUSE_INSTALLER_STATE=true
         info "Existing encrypted installer state detected; persisted deployment inputs will be reused."
         collect_existing_configuration
-    else
-        if [[ "${NONINTERACTIVE}" != "1" ]]; then
-            open_tty
-        fi
+    elif [[ ${NONINTERACTIVE} == 1 ]]; then
+        # Fail invalid automated inputs before installing any prerequisites.
         collect_configuration
     fi
+    stage "Verifying release"
     install_prerequisites
-    if [[ "${REUSE_INSTALLER_STATE}" != true ]]; then
-        resolve_wg_host
+    if [[ -d ${REPO_DIR}/.git ]]; then
+        info "Current checkout: $(release_git -C "${REPO_DIR}" rev-parse HEAD)"
     fi
     checkout_release
+    if [[ ${REUSE_INSTALLER_STATE} != true ]]; then
+        if [[ ${NONINTERACTIVE} == 1 ]]; then
+            resolve_wg_host
+        else
+            collect_configuration
+        fi
+    fi
+    stage "Preparing Ansible"
     install_ansible_toolchain
     install_collections
+    if [[ ${REUSE_INSTALLER_STATE} == true && ${NONINTERACTIVE} != 1 ]]; then
+        load_installer_inputs
+        confirm_configuration
+    fi
+    stage "Installing and checking services"
     run_ansible_pull
     print_summary
 }

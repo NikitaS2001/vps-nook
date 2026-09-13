@@ -5,46 +5,72 @@ one fresh VPS. Remote Ansible is intended for an existing controller workflow.
 
 ## Before installation
 
-Use a fresh Debian 12 or Ubuntu 24.04 amd64 VPS on a 1 GB or larger plan, with
-at least 900 MiB of RAM visible to the OS. Confirm `/dev/net/tun`, WireGuard,
-iptables/NAT, outbound network access, and a recovery console. Existing swap is
-diagnostic-only and is never changed.
+Check the [VPS requirements](../README.md#before-you-start) before choosing a path.
+Neither role modifies swap or zram.
 
 > [!WARNING]
 > Open the planned SSH and WireGuard ports in the provider firewall before
 > deployment. Keep the original SSH session open and provider console access
 > available until login on the hardened port succeeds.
 
-## Verified published installer
+## Quick installation
 
-Install and authenticate [GitHub CLI](https://cli.github.com/) on the VPS, then
-follow the repository's single
-[Verified release installation](../README.md#verified-release-installation).
-It downloads the exact release assets, verifies GitHub's attestation and the
-published checksum, and runs only the verified local installer bytes.
+The root README contains the canonical version-pinned command. v2.0.0 is still
+in preparation; wait for its publication before using the preview URLs.
+If curl is missing, install it first:
 
-The installer verifies the signed release tag again before using its detached
-commit. It asks for:
+```bash
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl
+```
 
-- `services` or `full` traffic policy;
-- hardened SSH and WireGuard ports;
-- administrator name and password;
-- AdGuard and wg-easy passwords;
-- internal domain suffix and optional names;
-- public WireGuard endpoint;
-- administrator SSH public key.
+After publication, a sudo-capable user can use this variant:
 
-Defaults are shown at each prompt. `services` is the default. `full` requires
-IPv4 egress; IPv6 routing is included only on hosts with IPv6 egress.
+```text
+curl -fsSL https://github.com/NikitaS2001/vps-nook/releases/download/v2.0.0/install.sh | sudo bash
+```
 
-The checkout and virtual environment remain under
-`/opt/zero-trust-vps-installer`. Deployment values are persisted under
-`/etc/zero-trust-vps` in a root-owned, encrypted Ansible Vault. A rerun reuses
-all persisted inputs and rejects implicit configuration or credential changes.
-Run the same verified local `install.sh` bytes again only to converge or upgrade
-the same configuration. Configuration changes and secret rotation are explicit
-operator operations; use one management path and do not mix controller-managed
-state with later public-installer reruns.
+Both commands require an SSH terminal for prompts, even though the script arrives
+through a pipe. For automation use `NOOK_NONINTERACTIVE=1` and the documented
+[configuration inputs](configuration.md). Never paste real passwords into shell
+history. The wizard uses hidden input and confirms each password.
+
+Piping a script to Bash executes bytes trusted through HTTPS. The installer's
+signed-tag verification protects the subsequent checkout, not the script
+already executing. Use the following path for verification before execution.
+
+## Verified installation
+
+The v2.0.0 release must be published first. Install [GitHub CLI](https://cli.github.com/)
+and authenticate with `gh auth login`. Use a new download directory.
+
+<!-- ssot:verified-quickstart:start -->
+```bash
+mkdir vps-nook-install
+cd vps-nook-install
+gh auth login
+gh release download v2.0.0 \
+  --repo NikitaS2001/vps-nook \
+  --pattern install.sh \
+  --pattern install.sh.sha256
+gh attestation verify install.sh \
+  --repo NikitaS2001/vps-nook \
+  --signer-workflow \
+    NikitaS2001/vps-nook/.github/workflows/release.yml \
+  --source-ref refs/tags/v2.0.0
+sha256sum --check install.sh.sha256
+sudo bash ./install.sh
+```
+<!-- ssot:verified-quickstart:end -->
+
+The installer verifies the SSH-signed tag, checks out its exact commit and shows
+the effective settings before applying server roles. Source-verification packages
+may already be installed when you cancel; secrets are removed from temporary files.
+
+Reruns reuse the authoritative encrypted inputs under `/etc/vps-nook`; see
+[automated inputs](configuration.md#automated-installer-inputs) and
+[upgrade compatibility](../UPGRADE.md). Do not mix controller deployments with
+installer state. Malformed vaults are preserved for recovery, never replaced.
 
 ## Remote Ansible deployment
 
@@ -72,6 +98,7 @@ running the playbook:
 
 ```bash
 ./scripts/bootstrap.sh
+source .venv/bin/activate
 ansible-vault encrypt \
   group_vars/all/vault_services.yml \
   group_vars/all/vault_ssh.yml
@@ -101,15 +128,12 @@ ssh -p <ssh_port> -L 51821:127.0.0.1:51821 \
 ```
 
 Open `http://127.0.0.1:51821`, sign in, create a client, and import its profile.
-Connect the client before opening the internal sites. In `services` mode, the
-server enforces access only to the managed VPN and service destinations; editing
-the client profile cannot turn it into a full tunnel.
+Connect the client before opening the internal sites. The default
+[traffic policy](configuration.md#traffic-policy) reaches managed services only.
 
 The internal sites default to `https://wg.internal` and
-`https://adguard.internal`. Trust the Caddy root certificate fetched by remote
-Ansible under `fetched_certs/<inventory-host>/root.crt`. A public installation
-keeps the checkout's fetched copy under
-`/opt/zero-trust-vps-installer/repo/fetched_certs/localhost/root.crt`.
+`https://adguard.internal`. [Trust your Caddy CA](#trust-the-internal-ca) before
+using them.
 
 AdGuard's bootstrap UI is available through a separate tunnel when needed:
 
@@ -120,3 +144,50 @@ ssh -p <ssh_port> -L 3000:127.0.0.1:3000 \
 
 Continue with [Configuration](configuration.md) or
 [Operations](operations.md).
+
+## Trust the internal CA
+
+Only install the CA from your own VPS. Its trust applies to certificates issued
+by that CA; remove it when retiring the server. Do not copy the CA private key.
+
+On your computer, copy the public certificate from the authenticated server
+(replace the address, username and SSH port):
+
+```bash
+ssh -p 2222 sysadmin@<vps-address> \
+  'sudo cat /opt/vps-nook-installer/repo/fetched_certs/localhost/root.crt' \
+  > vps-nook-root.crt
+openssl x509 -in vps-nook-root.crt -noout -subject -fingerprint -sha256
+```
+
+Compare the fingerprint with the same command on the server before trusting it.
+For controller-managed installation, use `fetched_certs/<inventory-host>/root.crt`.
+
+- **Windows:** open the certificate, choose Install Certificate, and select
+  Trusted Root Certification Authorities for the intended user or computer.
+- **macOS:** import it into Keychain Access, open the certificate's Trust settings,
+  and enable trust for SSL. Authenticate when prompted.
+- **Debian/Ubuntu desktop:** copy the `.crt` file to
+  `/usr/local/share/ca-certificates/vps-nook.crt`, then run
+  `sudo update-ca-certificates`. Other Linux distributions use different trust tools.
+- **Android:** transfer the public certificate, then use Settings to install a
+  CA certificate (usually under Security / Encryption & credentials). Settings
+  names depend on the device; some apps do not trust user-installed CAs.
+- **iOS/iPadOS:** transfer and open the certificate, install its downloaded profile
+  in Settings, then enable full trust under General / About / Certificate Trust Settings.
+
+Reconnect the VPN and visit both internal HTTPS sites. Some browsers use a separate
+certificate store; if necessary, import the same CA into the browser's Authorities
+store. Do not work around an unexpected certificate warning by disabling verification.
+
+Platform references: [Apple certificate trust](https://support.apple.com/en-ie/102390),
+[macOS Keychain trust](https://support.apple.com/en-gb/guide/keychain-access/kyca11871/mac),
+[Android certificates](https://support.google.com/pixelphone/answer/2844832?hl=en), and
+[Ubuntu trust store](https://ubuntu.com/server/docs/how-to/security/install-a-root-ca-certificate-in-the-trust-store/).
+
+## If setup stops
+
+The final message identifies the failed stage and whether encrypted inputs remain.
+Fix the reported prerequisite and rerun the same tagged installer. Keep your original
+SSH session open; a local listener check does not prove your provider firewall permits
+new logins. Use [SSH recovery](operations.md#ssh-recovery) if needed.

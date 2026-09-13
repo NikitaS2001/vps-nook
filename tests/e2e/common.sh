@@ -308,7 +308,7 @@ verify_deployment() {
 
     echo "[check] the deployed Compose file contains no panel password"
     out="$(run_remote "${target}" "${port}" "${key}" \
-        'sudo grep -q INIT_PASSWORD /opt/zero-trust-vps/docker-compose.yml 2>/dev/null && echo PRESENT || echo CLEAN')"
+        'sudo grep -q INIT_PASSWORD /opt/vps-nook/docker-compose.yml 2>/dev/null && echo PRESENT || echo CLEAN')"
     [[ "${out}" == "CLEAN" ]] || fail "docker-compose.yml still contains INIT_PASSWORD"
     pass "compose file is free of the panel password"
 }
@@ -321,7 +321,7 @@ verify_traffic_mode() {
     [[ "${expected_mode}" == services || "${expected_mode}" == full ]] \
         || fail "invalid expected traffic mode: ${expected_mode}"
     actual_mode="$(run_remote "${target}" "${port}" "${key}" \
-        'sudo cat /opt/zero-trust-vps/.wg-traffic-mode')" \
+        'sudo cat /opt/vps-nook/.wg-traffic-mode')" \
         || fail "could not read deployed traffic mode"
     [[ "${actual_mode}" == "${expected_mode}" ]] \
         || fail "deployed traffic mode does not match ${expected_mode}"
@@ -359,6 +359,7 @@ boot_vm() {
     local instance_id="$6" hostname="$7" user_data_file="$8"
     shift 8
     local hostfwd netdev="user,id=n0"
+    local runner_pidfile="${tmp_dir}/qemu.pid"
 
     echo "[E2E] Preparing the cloud image..."
     if [[ "${image}" == http* ]]; then
@@ -393,13 +394,65 @@ SEEDEOF
     done
 
     echo "[E2E] Booting the VM (KVM)..."
+    if [[ -n ${E2E_PROCESS_REGISTRY:-} ]]; then
+        runner_pidfile="$(mktemp "${E2E_PROCESS_REGISTRY}/qemu.XXXXXX.pid")"
+        python3 - "${runner_pidfile}" "${tmp_dir}" <<'PYINTENT'
+import os
+from pathlib import Path
+import sys
+pidfile, directory = map(Path, sys.argv[1:])
+started = int(float(Path("/proc/uptime").read_text().split()[0]) * os.sysconf("SC_CLK_TCK"))
+intent = pidfile.with_suffix(".intent")
+intent.write_text(f"{pidfile}\n{started}\n{directory}\n")
+intent.chmod(0o600)
+PYINTENT
+    fi
     qemu-system-x86_64 -enable-kvm -m "${mem_mb}" -smp "${smp}" \
         -drive file="${tmp_dir}/disk.qcow2",if=virtio,format=qcow2 \
         -drive file="${tmp_dir}/seed.iso",if=virtio,format=raw \
         -netdev "${netdev}" \
         -device virtio-net-pci,netdev=n0 \
         -display none -serial file:"${tmp_dir}/serial.log" \
-        -daemonize -pidfile "${tmp_dir}/qemu.pid"
+        -daemonize -pidfile "${runner_pidfile}"
+    if [[ ${runner_pidfile} != "${tmp_dir}/qemu.pid" ]]; then
+        cp -- "${runner_pidfile}" "${tmp_dir}/qemu.pid"
+    fi
+    # Publish ownership outside VM state before any delay/cleanup can remove it.
+    if [[ -n ${E2E_PROCESS_REGISTRY:-} && -s ${tmp_dir}/qemu.pid ]]; then
+        python3 - "${E2E_PROCESS_REGISTRY}" "${tmp_dir}" <<'PYREG'
+import os
+from pathlib import Path
+import sys
+import tempfile
+
+registry, directory = map(Path, sys.argv[1:])
+pid = int((directory / "qemu.pid").read_text())
+started = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+record = registry / f"{pid}.record"
+fd, temporary = tempfile.mkstemp(prefix=f".{pid}.record.", dir=registry)
+published = False
+try:
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w") as stream:
+        stream.write(f"{pid}\n{started}\n{directory}\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.link(temporary, record)
+    published = True
+    os.unlink(temporary)
+    directory_fd = os.open(registry, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+finally:
+    if not published:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+PYREG
+    fi
     sleep 2
     if [[ ! -s "${tmp_dir}/qemu.pid" ]]; then
         echo "[FAIL] qemu did not start. Serial log:" >&2

@@ -25,12 +25,23 @@ jobs:
         run: scripts/bootstrap.sh
 
       - name: Run quick checks
+        env:
+          NOOK_JUNIT_DIR: reports
         run: scripts/check.sh
+
+      - name: Upload test summary
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-quick-junit
+          path: reports/quick.xml
+          if-no-files-found: error
+          retention-days: 7
 
   qemu:
     needs: static
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 80
     strategy:
       fail-fast: false
       matrix:
@@ -46,6 +57,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Bootstrap development tools
+        run: scripts/bootstrap.sh
+
       - name: Install QEMU dependencies
         run: sudo apt-get update && sudo apt-get install -y genisoimage qemu-system-x86 qemu-utils
 
@@ -56,5 +70,14 @@ jobs:
         env:
           QEMU_IMAGE: ${{ matrix.image }}
           QEMU_USER: ${{ matrix.user }}
-          ZERO_TRUST_WG_TRAFFIC_MODE: services
-        run: tests/e2e/qemu-install.sh --client-test --idempotency-test --reboot-test
+          NOOK_WG_TRAFFIC_MODE: services
+        run: .venv/bin/pytest -m qemu --junitxml=reports/qemu.xml
+
+      - name: Upload test summary
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-qemu-${{ matrix.os }}-junit
+          path: reports/qemu.xml
+          if-no-files-found: error
+          retention-days: 7

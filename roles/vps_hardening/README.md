@@ -34,14 +34,9 @@ is [`meta/main.yml`](meta/main.yml); defaults are in
 | `vps_hardening_package_upgrade_mode` | `safe` | Supported apt upgrade policy |
 | `vps_hardening_enable_ufw_on_local_connection` | `false` | Installer-only opt-in for local Ansible |
 
-UI forwarding ports and Fail2Ban timing/retry values are also validated by the
-argument specification. Change them in normal group variables, not by editing
-role tasks.
-
 ## Preconditions and effects
 
-- Target: Debian 12 or Ubuntu 24.04 on amd64, on a 1 GB or larger VPS plan
-  with at least 900 MiB of RAM visible to the OS.
+- Enforces the [supported VPS baseline](../../README.md#before-you-start).
 - The public installer reports existing swap for diagnostics; this role never
   changes swap or zram.
 - `sudo` is installed before the managed user is created.

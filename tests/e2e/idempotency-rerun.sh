@@ -37,13 +37,13 @@ ADGUARD_DOMAIN="${ADGUARD_INTERNAL_DOMAIN:-adguard.${DOMAIN_SUFFIX}}"
 remote_snapshot() {
     run_remote "${TARGET}" "${PORT}" "${KEY}" 'sudo bash -se' <<'REMOTE'
 set -euo pipefail
-project=/opt/zero-trust-vps
+project=/opt/vps-nook
 for path in \
     "${project}/volumes/wg-easy/wg-easy.db" \
     "${project}/volumes/caddy/data/caddy/pki/authorities/local/root.crt" \
     "${project}/docker-compose.yml" \
-    /etc/zero-trust-vps/installer-vault.pass \
-    /etc/zero-trust-vps/installer-vault.yml; do
+    /etc/vps-nook/installer-vault.pass \
+    /etc/vps-nook/installer-vault.yml; do
     test -f "${path}" && test ! -L "${path}"
     printf 'file:%s=%s\n' "${path}" "$(sha256sum "${path}" | cut -d' ' -f1)"
 done
@@ -63,11 +63,11 @@ printf -v q_domains '%q' "${WG_DOMAIN} ${ADGUARD_DOMAIN}"
 
 echo '[E2E] Re-running the current installer on the upgraded guest...'
 run_remote "${TARGET}" "${PORT}" "${KEY}" \
-    "sudo env ZERO_TRUST_DEV_MODE=1 ZERO_TRUST_NONINTERACTIVE=1 \
-    ZERO_TRUST_REPO_URL=${q_repo} ZERO_TRUST_RELEASE_REF=${q_ref} \
-    ZERO_TRUST_SSH_PORT='${SSH_PORT}' ZERO_TRUST_WG_PORT='${WG_PORT}' \
-    ZERO_TRUST_ADMIN_USER=sysadmin \
-    ZERO_TRUST_INTERNAL_DOMAIN_SUFFIX=${q_suffix} ZERO_TRUST_INTERNAL_DOMAINS=${q_domains} \
+    "sudo env NOOK_DEV_MODE=1 NOOK_NONINTERACTIVE=1 \
+    NOOK_REPO_URL=${q_repo} NOOK_RELEASE_REF=${q_ref} \
+    NOOK_SSH_PORT='${SSH_PORT}' NOOK_WG_PORT='${WG_PORT}' \
+    NOOK_ADMIN_USER=sysadmin \
+    NOOK_INTERNAL_DOMAIN_SUFFIX=${q_suffix} NOOK_INTERNAL_DOMAINS=${q_domains} \
     bash /var/tmp/zt-current-install.sh"
 
 after="$(remote_snapshot)"

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Disposable single-guest lifecycle test:
-#   immutable v1.2.1 -> current working tree -> no-change rerun -> restore drill.
+#   compatible Nook baseline -> current working tree -> no-change rerun -> restore drill.
 #
 # The source repository presented to the guest contains the original signed
-# v1.2.1 tag plus a synthetic current branch built from the exact working tree.
+# Nook baseline plus a synthetic current branch built from the exact working tree.
 set -euo pipefail
 umask 077
 
@@ -19,6 +19,7 @@ Environment:
   QEMU_WG_PORT      host UDP port forwarded to WireGuard (default 51863)
   E2E_ARTIFACT_DIR  persistent log directory
                     (default: ${TMPDIR:-/tmp}/ztvps-lifecycle-evidence.UTC)
+  E2E_BASELINE_REF  signed Nook baseline tag (default v2.0.0; pre-release fallback is explicitly a reinstall test)
   E2E_SOURCE_FIXTURE_ONLY=1  validate the dual-ref source fixture without a VM
 EOF
     exit 0
@@ -41,8 +42,9 @@ QEMU_WG_PORT="${QEMU_WG_PORT:-51863}"
 CURRENT_REF=e2e-current
 ARTIFACT_DIR="${E2E_ARTIFACT_DIR:-${TMPDIR:-/tmp}/ztvps-lifecycle-evidence.$(date -u +%Y%m%dT%H%M%SZ)}"
 SOURCE_FIXTURE_ONLY="${E2E_SOURCE_FIXTURE_ONLY:-0}"
-EXPECTED_BASELINE_TAG_OBJECT=689458a7bbbb73e7c4796612ca5e5215452cb386
-EXPECTED_BASELINE_COMMIT=8d650df376743897f0970f460e3ae8fccf340571
+BASELINE_REF="${E2E_BASELINE_REF:-v2.0.0}"
+[[ ${BASELINE_REF} =~ ^v2\.[0-9]+\.[0-9]+$ ]] || fail 'baseline must be a compatible Nook v2 release'
+BASELINE_KIND=release
 
 [[ ${SOURCE_FIXTURE_ONLY} =~ ^[01]$ ]] \
     || fail 'E2E_SOURCE_FIXTURE_ONLY must be 0 or 1'
@@ -100,15 +102,21 @@ ssh-keygen -q -t ed25519 -N '' -f "${TMP_DIR}/id_ed25519" -C e2e-lifecycle
 PUBKEY="$(<"${TMP_DIR}/id_ed25519.pub")"
 ADMIN_PASS="$(openssl rand -hex 12)"
 ADGUARD_PASS="$(openssl rand -hex 12)"
-WG_PASS="${ZERO_TRUST_WG_PASSWORD:-Twelve\$LIFECYCLE_PROBE}"
+WG_PASS="${NOOK_WG_PASSWORD:-Twelve\$LIFECYCLE_PROBE}"
 
-echo '[E2E] Building a guest-local origin with the immutable baseline and exact working tree...'
-[[ $(git -C "${ROOT_DIR}" cat-file -t refs/tags/v1.2.1) == tag ]] \
-    || fail 'v1.2.1 must be an annotated tag'
-BASELINE_SHA="$(git -C "${ROOT_DIR}" rev-parse 'v1.2.1^{commit}')"
-[[ $(git -C "${ROOT_DIR}" rev-parse refs/tags/v1.2.1) == "${EXPECTED_BASELINE_TAG_OBJECT}" \
-    && ${BASELINE_SHA} == "${EXPECTED_BASELINE_COMMIT}" ]] \
-    || fail 'local v1.2.1 does not match the immutable release identity'
+echo '[E2E] Building a guest-local origin with Nook baseline and exact working tree...'
+if git -C "${ROOT_DIR}" rev-parse --verify "refs/tags/${BASELINE_REF}" >/dev/null 2>&1; then
+    [[ $(git -C "${ROOT_DIR}" cat-file -t "refs/tags/${BASELINE_REF}") == tag ]] || fail 'baseline must be an annotated signed tag'
+    git -C "${ROOT_DIR}" -c gpg.format=ssh \
+        -c gpg.ssh.allowedSignersFile="${ROOT_DIR}/.github/release-allowed-signers" \
+        verify-tag "${BASELINE_REF}" || fail 'untrusted baseline tag'
+    BASELINE_SHA="$(git -C "${ROOT_DIR}" rev-parse "${BASELINE_REF}^{commit}")"
+else
+    [[ ${BASELINE_REF} == v2.0.0 && -z ${E2E_BASELINE_REF:-} ]] || fail 'requested baseline tag is missing'
+    BASELINE_KIND=bootstrap-snapshot
+    BASELINE_REF=e2e-nook-baseline
+    echo '[E2E] No Nook release exists yet: test reinstall/restore using a working-tree baseline, not released-version upgrade proof.'
+fi
 git clone --quiet --bare "${ROOT_DIR}" "${TMP_DIR}/origin.git"
 install -d -m 0700 "${TMP_DIR}/current-tree"
 while IFS= read -r -d '' path; do
@@ -122,15 +130,24 @@ git -C "${TMP_DIR}/current-tree" init -q -b "${CURRENT_REF}"
 git -C "${TMP_DIR}/current-tree" add -A
 git -C "${TMP_DIR}/current-tree" -c user.name=e2e -c user.email=e2e.invalid \
     commit -qm 'exact lifecycle working tree'
+if [[ ${BASELINE_KIND} == bootstrap-snapshot ]]; then
+    BASELINE_SHA="$(git -C "${TMP_DIR}/current-tree" rev-parse HEAD)"
+    git -C "${TMP_DIR}/current-tree" branch "${BASELINE_REF}"
+    git -C "${TMP_DIR}/current-tree" -c user.name=e2e -c user.email=e2e.invalid -c commit.gpgsign=false \
+        commit --allow-empty -qm 'current lifecycle boundary (same source bytes)'
+fi
 CURRENT_SHA="$(git -C "${TMP_DIR}/current-tree" rev-parse HEAD)"
 git -C "${TMP_DIR}/current-tree" remote add origin "${TMP_DIR}/origin.git"
 git -C "${TMP_DIR}/current-tree" push -q origin "${CURRENT_REF}"
-printf 'baseline_ref=v1.2.1\nbaseline_sha=%s\ncurrent_ref=%s\ncurrent_sha=%s\n' \
-    "${BASELINE_SHA}" "${CURRENT_REF}" "${CURRENT_SHA}" \
+if [[ ${BASELINE_KIND} == bootstrap-snapshot ]]; then
+    git -C "${TMP_DIR}/current-tree" push -q origin "${BASELINE_REF}"
+fi
+printf 'baseline_ref=%s\nbaseline_kind=%s\nbaseline_sha=%s\ncurrent_ref=%s\ncurrent_sha=%s\n' \
+    "${BASELINE_REF}" "${BASELINE_KIND}" "${BASELINE_SHA}" "${CURRENT_REF}" "${CURRENT_SHA}" \
     >"${ARTIFACT_DIR}/source-provenance.txt"
 git --git-dir="${TMP_DIR}/origin.git" ls-tree -r --full-tree "${CURRENT_SHA}" \
     >"${ARTIFACT_DIR}/source-manifest.txt"
-[[ $(git --git-dir="${TMP_DIR}/origin.git" rev-parse 'v1.2.1^{commit}') == "${BASELINE_SHA}" ]]
+[[ $(git --git-dir="${TMP_DIR}/origin.git" rev-parse "${BASELINE_REF}^{commit}") == "${BASELINE_SHA}" ]]
 [[ $(git --git-dir="${TMP_DIR}/origin.git" rev-parse "${CURRENT_REF}^{commit}") == "${CURRENT_SHA}" ]]
 [[ $(git --git-dir="${TMP_DIR}/origin.git" show "${CURRENT_REF}:install.sh" | sha256sum | cut -d' ' -f1) \
     == "$(sha256sum "${ROOT_DIR}/install.sh" | cut -d' ' -f1)" ]]
@@ -160,19 +177,19 @@ tar -czf - -C "${TMP_DIR}" origin.git | \
     run_remote_stdin "${GUEST}" "${QEMU_SSH_PORT}" "${TMP_DIR}/id_ed25519" \
         'sudo tar -xzf - -C /var/tmp && sudo chown -R root:root /var/tmp/origin.git && sudo chmod -R go-rwx /var/tmp/origin.git'
 run_remote "${GUEST}" "${QEMU_SSH_PORT}" "${TMP_DIR}/id_ed25519" \
-    "sudo sh -eu -c \"git --git-dir=/var/tmp/origin.git show v1.2.1:install.sh > /var/tmp/zt-v1.2.1-install.sh && git --git-dir=/var/tmp/origin.git show '${CURRENT_REF}':install.sh > /var/tmp/zt-current-install.sh && chmod 0700 /var/tmp/zt-v1.2.1-install.sh /var/tmp/zt-current-install.sh\""
+    "sudo sh -eu -c \"git --git-dir=/var/tmp/origin.git show '${BASELINE_REF}':install.sh > /var/tmp/nook-baseline-install.sh && git --git-dir=/var/tmp/origin.git show '${CURRENT_REF}':install.sh > /var/tmp/zt-current-install.sh && chmod 0700 /var/tmp/nook-baseline-install.sh /var/tmp/zt-current-install.sh\""
 
 printf -v q_admin '%q' "${ADMIN_PASS}"
 printf -v q_adguard '%q' "${ADGUARD_PASS}"
 printf -v q_wg '%q' "${WG_PASS}"
 printf -v q_pubkey '%q' "${PUBKEY}"
-installer_environment="ZERO_TRUST_NONINTERACTIVE=1 ZERO_TRUST_REPO_URL=file:///var/tmp/origin.git \
-ZERO_TRUST_SSH_PORT=${E2E_SSH_PORT} ZERO_TRUST_WG_PORT=${E2E_WG_PORT} \
-ZERO_TRUST_ADMIN_USER=sysadmin ZERO_TRUST_ADMIN_PASSWORD=${q_admin} \
-ZERO_TRUST_ADGUARD_PASSWORD=${q_adguard} ZERO_TRUST_WG_PASSWORD=${q_wg} \
-ZERO_TRUST_INTERNAL_DOMAIN_SUFFIX=internal \
-ZERO_TRUST_INTERNAL_DOMAINS='wg.internal adguard.internal' \
-ZERO_TRUST_SSH_PUBKEY=${q_pubkey} ZERO_TRUST_WG_HOST=127.0.0.1"
+installer_environment="NOOK_NONINTERACTIVE=1 NOOK_REPO_URL=file:///var/tmp/origin.git \
+NOOK_SSH_PORT=${E2E_SSH_PORT} NOOK_WG_PORT=${E2E_WG_PORT} \
+NOOK_ADMIN_USER=sysadmin NOOK_ADMIN_PASSWORD=${q_admin} \
+NOOK_ADGUARD_PASSWORD=${q_adguard} NOOK_WG_PASSWORD=${q_wg} \
+NOOK_INTERNAL_DOMAIN_SUFFIX=internal \
+NOOK_INTERNAL_DOMAINS='wg.internal adguard.internal' \
+NOOK_SSH_PUBKEY=${q_pubkey} NOOK_WG_HOST=127.0.0.1"
 
 TARGET='sysadmin@127.0.0.1'
 
@@ -181,7 +198,7 @@ run_baseline_install() {
     local target=$2
     local ssh_port=$3
     run_remote "${target}" "${ssh_port}" "${TMP_DIR}/id_ed25519" \
-        "sudo env ${installer_environment} ZERO_TRUST_RELEASE_REF=v1.2.1 bash /var/tmp/zt-v1.2.1-install.sh" \
+        "sudo env ${installer_environment} NOOK_DEV_MODE=1 NOOK_RELEASE_REF=${BASELINE_REF} bash /var/tmp/nook-baseline-install.sh" \
         2>&1 | tee "${log_file}"
 }
 
@@ -190,39 +207,30 @@ connect_as_admin() {
     require_ssh_ready "${TARGET}" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" 60
 }
 
-# v1.2.1 validates Caddy through a mutable Docker tag without retrying its
-# image pull. Retry its unchanged installer once so transient registry failures
-# do not invalidate the upgrade lifecycle contract.
-echo '[E2E] Installing immutable v1.2.1 baseline...'
-if ! run_baseline_install "${ARTIFACT_DIR}/baseline-install.log" \
-    "${GUEST}" "${QEMU_SSH_PORT}"; then
-    echo '[E2E] Retrying immutable v1.2.1 baseline after validation failure...'
-    connect_as_admin
-    run_baseline_install "${ARTIFACT_DIR}/baseline-install-retry.log" \
-        "${TARGET}" "${QEMU_ADMIN_PORT}"
-fi
+echo "[E2E] Installing Nook baseline ${BASELINE_REF} (${BASELINE_KIND})..."
+run_baseline_install "${ARTIFACT_DIR}/baseline-install.log" "${GUEST}" "${QEMU_SSH_PORT}"
 connect_as_admin
 deployed_baseline="$(run_remote "${TARGET}" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
-    'sudo git -C /opt/zero-trust-vps-installer/repo rev-parse HEAD')"
-[[ ${deployed_baseline} == "${BASELINE_SHA}" ]] || fail 'guest baseline does not match v1.2.1'
+    'sudo git -C /opt/vps-nook-installer/repo rev-parse HEAD')"
+[[ ${deployed_baseline} == "${BASELINE_SHA}" ]] || fail 'guest baseline does not match recorded Nook baseline'
 baseline_wg_identity="$(run_remote "${TARGET}" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
-    "sudo python3 -c \"import json,sqlite3; db=sqlite3.connect('/opt/zero-trust-vps/volumes/wg-easy/wg-easy.db'); value={'setup_step':db.execute('SELECT setup_step FROM general_table').fetchall(),'users':db.execute('SELECT * FROM users_table ORDER BY id').fetchall()}; db.close(); print(json.dumps(value,sort_keys=True,separators=(',',':')))\"")"
+    "sudo python3 -c \"import json,sqlite3; db=sqlite3.connect('/opt/vps-nook/volumes/wg-easy/wg-easy.db'); value={'setup_step':db.execute('SELECT setup_step FROM general_table').fetchall(),'users':db.execute('SELECT * FROM users_table ORDER BY id').fetchall()}; db.close(); print(json.dumps(value,sort_keys=True,separators=(',',':')))\"")"
 baseline_ca="$(run_remote "${TARGET}" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
-    "sudo sha256sum /opt/zero-trust-vps/volumes/caddy/data/caddy/pki/authorities/local/root.crt | cut -d' ' -f1")"
-echo 'predicate.baseline_exact_tag=PASS' | tee -a "${ARTIFACT_DIR}/predicates.log"
+    "sudo sha256sum /opt/vps-nook/volumes/caddy/data/caddy/pki/authorities/local/root.crt | cut -d' ' -f1")"
+echo "predicate.baseline_${BASELINE_KIND}=PASS" | tee -a "${ARTIFACT_DIR}/predicates.log"
 
 echo '[E2E] Upgrading the same guest to the exact current working tree...'
 run_remote "${TARGET}" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
-    "sudo env ZERO_TRUST_DEV_MODE=1 ${installer_environment} ZERO_TRUST_RELEASE_REF=${CURRENT_REF} bash /var/tmp/zt-current-install.sh" \
+    "sudo env NOOK_DEV_MODE=1 NOOK_NONINTERACTIVE=1 NOOK_REPO_URL=file:///var/tmp/origin.git NOOK_RELEASE_REF=${CURRENT_REF} bash /var/tmp/zt-current-install.sh" \
     2>&1 | tee "${ARTIFACT_DIR}/upgrade.log"
 deployed_current="$(run_remote "${TARGET}" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
-    'sudo git -C /opt/zero-trust-vps-installer/repo rev-parse HEAD')"
+    'sudo git -C /opt/vps-nook-installer/repo rev-parse HEAD')"
 [[ ${deployed_current} == "${CURRENT_SHA}" ]] || fail 'guest upgrade does not match current synthetic commit'
 [[ $(run_remote "${TARGET}" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
-    "sudo python3 -c \"import json,sqlite3; db=sqlite3.connect('/opt/zero-trust-vps/volumes/wg-easy/wg-easy.db'); value={'setup_step':db.execute('SELECT setup_step FROM general_table').fetchall(),'users':db.execute('SELECT * FROM users_table ORDER BY id').fetchall()}; db.close(); print(json.dumps(value,sort_keys=True,separators=(',',':')))\"") == "${baseline_wg_identity}" ]] \
+    "sudo python3 -c \"import json,sqlite3; db=sqlite3.connect('/opt/vps-nook/volumes/wg-easy/wg-easy.db'); value={'setup_step':db.execute('SELECT setup_step FROM general_table').fetchall(),'users':db.execute('SELECT * FROM users_table ORDER BY id').fetchall()}; db.close(); print(json.dumps(value,sort_keys=True,separators=(',',':')))\"") == "${baseline_wg_identity}" ]] \
     || fail 'upgrade changed wg-easy setup or administrator identity'
 [[ $(run_remote "${TARGET}" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
-    "sudo sha256sum /opt/zero-trust-vps/volumes/caddy/data/caddy/pki/authorities/local/root.crt | cut -d' ' -f1") == "${baseline_ca}" ]] \
+    "sudo sha256sum /opt/vps-nook/volumes/caddy/data/caddy/pki/authorities/local/root.crt | cut -d' ' -f1") == "${baseline_ca}" ]] \
     || fail 'upgrade changed the Caddy CA identity'
 verify_deployment "${TARGET}" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519"
 echo 'predicate.upgrade_preserved_wg_identity_and_ca=PASS' | tee -a "${ARTIFACT_DIR}/predicates.log"

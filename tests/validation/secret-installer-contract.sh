@@ -203,7 +203,7 @@ INHERITED_ADMIN_PASSWORD=''
 INHERITED_ADGUARD_PASSWORD=''
 INHERITED_WG_PASSWORD=''
 INHERITED_SSH_PUBKEY=''
-ZERO_TRUST_NONINTERACTIVE=1
+NOOK_NONINTERACTIVE=1
 collect_configuration_noninteractive
 prepare_installer_vault
 [[ "${before}" == "$(sha256sum "${VAULT_PASS_FILE}" "${VAULT_FILE}")" ]] \
@@ -282,10 +282,10 @@ clear_inputs
         == '2222:51820:sysadmin:wg.internal adguard.internal' ]] \
         || fail 'fresh installer defaults did not resolve to explicit persisted values'
 )
-if (ZERO_TRUST_WG_EASY_ADMIN_PASSWORD=legacy collect_configuration_noninteractive) >/dev/null 2>&1; then
+if (NOOK_WG_EASY_ADMIN_PASSWORD=legacy collect_configuration_noninteractive) >/dev/null 2>&1; then
     fail 'legacy plaintext wg-easy variable was accepted'
 fi
-if (ZERO_TRUST_WG_ENABLE_IPV6=true collect_configuration) >/dev/null 2>&1; then
+if (NOOK_WG_ENABLE_IPV6=true collect_configuration) >/dev/null 2>&1; then
     fail 'legacy IPv6 toggle was accepted'
 fi
 
@@ -399,7 +399,7 @@ if (
 fi
 [[ ! -e "${mutation_trace}" ]] || fail 'architecture rejection happened after installer mutation'
 
-if grep -ERn 'vps_swap_mode|ZERO_TRUST_VPS_SWAP_MODE|zram-tools|bootstrap_swap' "${ROOT_DIR}/install.sh" \
+if grep -ERn 'vps_swap_mode|NOOK_VPS_SWAP_MODE|zram-tools|bootstrap_swap' "${ROOT_DIR}/install.sh" \
     "${ROOT_DIR}/group_vars" "${ROOT_DIR}/inventory" >"${TMP}/swap-surface"; then
     fail 'installer/config still exposes swap or zram management'
 fi
@@ -407,14 +407,14 @@ if grep -En 'write_extra_var (admin_password|adguard_password|wg_easy_admin_pass
     "${ROOT_DIR}/install.sh" >"${TMP}/plaintext-role-input"; then
     fail 'installer still sends a plaintext role password variable to Ansible'
 fi
-if grep -En 'ZERO_TRUST_TEST_FAIL_AFTER|vault_crash_point' "${ROOT_DIR}/install.sh" \
+if grep -En 'NOOK_TEST_FAIL_AFTER|vault_crash_point' "${ROOT_DIR}/install.sh" \
     >"${TMP}/production-fault-hook"; then
     fail 'production installer still contains a test-only fault hook'
 fi
 grep -Fq 'this tag is required only by the release gate' "${ROOT_DIR}/install.sh" \
-    || fail 'v1.3.2 release-preparation contract is not documented in the installer'
+    || fail 'v2.0.0 release-preparation contract is not documented in the installer'
 rerun_block="$(sed -n '/^REMOTE_RERUN=/,/^INNER_RERUN$/p' "${ROOT_DIR}/tests/e2e/run-public-install.sh")"
-if grep -Eq 'ZERO_TRUST_(ADMIN_PASSWORD|ADGUARD_PASSWORD|WG_PASSWORD|SSH_PUBKEY)' <<<"${rerun_block}"; then
+if grep -Eq 'NOOK_(ADMIN_PASSWORD|ADGUARD_PASSWORD|WG_PASSWORD|SSH_PUBKEY)' <<<"${rerun_block}"; then
     fail 'public E2E rerun still supplies credential inputs'
 fi
 

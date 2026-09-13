@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Backup the zero-trust stack. Run on the VPS as root.
+# Backup the VPS Nook stack. Run on the VPS as root.
 #
 # Usage:
 #   sudo env AGE_KEY="age1..." scripts/backup.sh [/path/to/backup.tar.gz]
@@ -12,12 +12,20 @@
 #     docker-compose.override.yml, Caddyfile, Caddyfile.d
 #   - encrypts the archive with age by default; plaintext requires the explicit
 #     --allow-plaintext escape hatch
-#   - rotates old backups, keeping ZERO_TRUST_KEEP_BACKUPS (default 14)
+#   - rotates old backups, keeping NOOK_KEEP_BACKUPS (default 14)
 #
 # Encrypted-restore companion: scripts/restore.sh. For very large/heavy
 # datasets consider restic (documented in README) instead of tar.
 set -euo pipefail
 umask 077
+
+for legacy_name in "${!ZERO_TRUST_@}"; do
+    [[ -n ${legacy_name} ]] || continue
+    printf '[FAIL] %s is no longer accepted; use NOOK_%s (value not shown).\n' \
+        "${legacy_name}" "${legacy_name#ZERO_TRUST_}" >&2
+    exit 1
+done
+
 
 usage() {
     cat <<'EOF'
@@ -46,10 +54,10 @@ if [[ ${ALLOW_PLAINTEXT} == false ]] && ! command -v age >/dev/null; then
     exit 1
 fi
 
-PROJECT_ROOT="${ZERO_TRUST_PROJECT_ROOT:-/opt/zero-trust-vps}"
+PROJECT_ROOT="${NOOK_PROJECT_ROOT:-/opt/vps-nook}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
-OUT="${1:-/opt/zt-backups/zt-${STAMP}.tar.gz}"
-KEEP="${ZERO_TRUST_KEEP_BACKUPS:-14}"
+OUT="${1:-/opt/vps-nook-backups/nook-${STAMP}.tar.gz}"
+KEEP="${NOOK_KEEP_BACKUPS:-14}"
 
 COMPOSE_ARGS=(-f "${PROJECT_ROOT}/docker-compose.yml")
 [[ -f "${PROJECT_ROOT}/docker-compose.override.yml" ]] \
@@ -75,7 +83,7 @@ trap cleanup EXIT
 [[ -d "${PROJECT_ROOT}/volumes" ]] || { echo "[FAIL] ${PROJECT_ROOT}/volumes not found" >&2; exit 1; }
 OUTPUT_DIR="$(dirname "${OUT}")"
 mkdir -p "${OUTPUT_DIR}"
-TAR_FILE="$(mktemp "${OUTPUT_DIR}/.zt-backup.tar.XXXXXX")"
+TAR_FILE="$(mktemp "${OUTPUT_DIR}/.nook-backup.tar.XXXXXX")"
 
 # Stop/start the whole project, including any docker-compose.override.yml
 # user services, so the snapshot is consistent.
@@ -99,7 +107,7 @@ chmod 600 "${TAR_FILE}"
 if [[ ${ALLOW_PLAINTEXT} == false ]]; then
     echo "[3/4] Encrypting with age..."
     FINAL_OUT="${OUT}.age"
-    PUBLISH_TMP="$(mktemp "${OUTPUT_DIR}/.zt-backup.publish.XXXXXX")"
+    PUBLISH_TMP="$(mktemp "${OUTPUT_DIR}/.nook-backup.publish.XXXXXX")"
     age -r "${AGE_KEY}" "${TAR_FILE}" >"${PUBLISH_TMP}"
     chmod 600 "${PUBLISH_TMP}"
     [[ -s ${PUBLISH_TMP} && $(stat -c '%a' "${PUBLISH_TMP}") == 600 ]] \
@@ -126,8 +134,8 @@ if ! docker compose "${COMPOSE_ARGS[@]}" up -d --no-recreate >/dev/null 2>&1; th
 fi
 
 echo "[4/4] Rotating old backups (keeping ${KEEP})..."
-if [[ -d /opt/zt-backups ]]; then
-    find /opt/zt-backups -maxdepth 1 -type f -name 'zt-*.tar.gz*' -print0 \
+if [[ -d /opt/vps-nook-backups ]]; then
+    find /opt/vps-nook-backups -maxdepth 1 -type f -name 'nook-*.tar.gz*' -print0 \
         | sort -zr \
         | tail -n +$((KEEP + 1)) -z \
         | xargs -0 -r rm -f
