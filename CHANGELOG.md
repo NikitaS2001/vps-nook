@@ -2,7 +2,7 @@
 
 Notable changes are recorded here. The project follows Semantic Versioning.
 
-## [v2.0.0] - Unreleased
+## [v2.0.0] - 2026-09-13
 
 - Rename the project to VPS Nook, with NOOK_* inputs and new server paths.
 - Reject legacy installations before deployment; automatic v1 migration is not supported.
@@ -48,6 +48,7 @@ Notable changes are recorded here. The project follows Semantic Versioning.
 
 - Publish the first tagged release with the public installer.
 
+[v2.0.0]: https://github.com/NikitaS2001/vps-nook/compare/v1.3.2...v2.0.0
 [v1.3.2]: https://github.com/NikitaS2001/ansible-zero-trust-vps/compare/v1.3.1...v1.3.2
 
 [v1.3.1]: https://github.com/NikitaS2001/ansible-zero-trust-vps/compare/v1.3.0...v1.3.1
