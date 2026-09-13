@@ -11,6 +11,7 @@ Notable changes are recorded here. The project follows Semantic Versioning.
 - Enforce the AdGuard bcrypt limit in UTF-8 bytes before accepting a password.
 - Separate quick installation from optional pre-execution release verification.
 - Unify native fixtures, Bash contracts and QEMU scenarios under pytest with private diagnostics and bounded cleanup.
+- Keep quick checks unprivileged; run real installer sudo/PTY coverage only inside the disposable QEMU guest.
 - Run QEMU and lifecycle/restore weekly on Mondays at 02:17 UTC, with manual dispatch for pre-release checks.
 
 ## [v1.3.2] - 2026-08-31

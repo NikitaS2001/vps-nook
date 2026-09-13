@@ -68,12 +68,12 @@ HISTORICAL_CONTRACTS = frozenset({
     "release-contract.sh",
 })
 
-# Required native boundaries. Real SSH remains in VMS.
+# Required native boundaries. Real SSH and privileged installer PTY remain in VMS.
 NATIVE = {
     "installer-ux.sh": ("tests/installer/test_ux.py", tuple("test_installer_" + name for name in (
         "defaults", "colors", "cancel", "edit_invalid_port", "ctrl_c", "eof", "password_length",
         "utf8", "password_confirmation", "legacy_variable", "legacy_path", "no_tty", "saved_state",
-        "noninteractive", "noninteractive_utf8", "truncated", "sudo"))),
+        "noninteractive", "noninteractive_utf8", "truncated"))),
     "ssh-recovery.sh": ("tests/contracts/test_ssh_recovery.py", ("test_ssh_recovery_mocked_systemd",)),
     "check-tooling.sh": ("tests/runner/test_runner.py", (
         "test_wrapper_selection", "test_wrapper_failure", "test_wrapper_arguments", "test_bootstrap_help",

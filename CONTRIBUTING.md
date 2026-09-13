@@ -19,7 +19,7 @@ Pytest runs sequentially; do not use xdist.
 
 | Command | Selection |
 | --- | --- |
-| `pytest` | Quick tools, native fixtures and Bash contracts; no VM |
+| `pytest` | Unprivileged quick tools, native fixtures and Bash contracts; no VM |
 | `pytest -k installer` | Installer cases within quick |
 | `pytest -m qemu` | Services-mode VM installation and negative scenarios |
 | `pytest -m remote` | Real SSH rollback, cutover, UFW failure and reboot |
@@ -32,8 +32,10 @@ Pytest runs sequentially; do not use xdist.
 Explicit `-m` replaces the default quick selection. Empty selections return 5;
 invalid arguments return 4. Pytest collects failures; `check.sh` uses `-x` and
 stops at the first failed gate. SBOM runs once in the release sequence.
-Missing prerequisites fail; only local passwordless-sudo coverage may skip
-(CI requires it). See [E2E](tests/e2e/README.md) for VM prerequisites and scope.
+Missing prerequisites fail. Quick checks do not invoke host `sudo` or require
+passwordless sudo, including in CI. The real installer sudo/PTY scenario runs
+inside the disposable QEMU guest. See [E2E](tests/e2e/README.md) for VM
+prerequisites and scope.
 
 ## Isolation and diagnostics
 

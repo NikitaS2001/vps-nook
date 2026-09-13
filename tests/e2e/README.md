@@ -34,6 +34,12 @@ tests/e2e/qemu-install.sh \
   --client-test --idempotency-test --reboot-test
 ```
 
+Before provisioning, the harness runs the installer dialogue through a real
+`sudo` pipeline and PTY as the guest's unprivileged cloud user. Provisioning
+functions are stubbed for this dialogue check; it verifies root execution,
+completion, and hidden password input. Privileged fixture execution and cleanup
+stay inside the disposable guest. Local quick checks never invoke host `sudo`.
+
 Supported flags:
 
 | Flag | Scenario |

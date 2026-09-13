@@ -374,6 +374,10 @@ require_wrong_scp_host_key_rejected "${GUEST}" "${QEMU_SSH_PORT}" \
 echo "[E2E] Copying the repository into the guest..."
 copy_repo_to_guest "${GUEST}" "${QEMU_SSH_PORT}" "${TMP_DIR}/id_ed25519"
 
+echo "[E2E] Checking the installer sudo pipeline in a guest PTY..."
+run_remote "${GUEST}" "${QEMU_SSH_PORT}" "${TMP_DIR}/id_ed25519" \
+    "cd /tmp/ztrepo && python3 -m tests.e2e.installer_sudo"
+
 if [[ "${DO_BOOTSTRAP_TIMEOUT}" == "true" ]]; then
     echo "[E2E] Injecting a bounded pre-setup wg-easy startup timeout..."
     run_remote "${GUEST}" "${QEMU_SSH_PORT}" "${TMP_DIR}/id_ed25519" \

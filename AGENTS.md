@@ -89,7 +89,7 @@ Pytest is the sequential runner; do not use xdist. `tests/registry.py` registers
 
 Plain `pytest` defaults to `quick`; explicit `-m qemu`, `-m lifecycle`, `-m remote`, or `-m release` replaces that selection. Collection runs no subprocesses or deployment preparation. Execution fixtures preserve Git history/tags and dirty source in private snapshots, excluding ignored operator files; create deployment examples there, never in the working checkout.
 
-No percentage-coverage gate: prove affected behavior, idempotency, failure propagation, and rollback. Native PTY/mocked-systemd tests do not replace real provisioning or SSH coverage. Some quick contracts invoke Docker Compose; missing prerequisites fail rather than silently skip, except optional local passwordless-sudo coverage.
+No percentage-coverage gate: prove affected behavior, idempotency, failure propagation, and rollback. Native PTY/mocked-systemd tests do not replace real provisioning or SSH coverage. Some quick contracts invoke Docker Compose; missing prerequisites fail rather than silently skip. Quick checks never invoke host sudo, including in CI; real installer sudo/PTY coverage runs only inside the disposable QEMU guest.
 
 CI runs quick checks and services-mode QEMU on Debian 12/Ubuntu 24.04; weekly adds lifecycle/restore. QEMU requires KVM, `qemu-system-x86_64`, `qemu-img`, `genisoimage`, and SSH/network tools. Real remote/public and full/IPv6 scenarios have additional prerequisites; use disposable hosts and pinned host keys. See [E2E](tests/e2e/README.md) for scope and commands: VM success does not prove provider networking, and `tests/ansible-pull-smoke.yml` proves only localhost inventory resolution.
 
