@@ -33,20 +33,28 @@ inside the VPN. The default VPN mode reaches private services only; choose
 
 ## Install
 
-**v2.0.0 is in preparation. The command below is a preview, not a published
-installation endpoint.** v1 has no supported in-place upgrade: use a fresh VPS
-and read [UPGRADE.md](UPGRADE.md).
+For a fresh installation, download the installer from the latest published
+stable release. v1 has no supported in-place upgrade: use a fresh VPS and read
+[UPGRADE.md](UPGRADE.md).
 
 <!-- ssot:quickstart:start -->
-```text
-curl -fsSL https://github.com/NikitaS2001/vps-nook/releases/download/v2.0.0/install.sh | bash
+<!-- release-installer: post-merge-maintainer-publication -->
+```bash
+curl -fsSL https://github.com/NikitaS2001/vps-nook/releases/latest/download/install.sh | bash
 ```
 <!-- ssot:quickstart:end -->
 
-After release, run this command as root on your VPS. The wizard asks for your
-VPN purpose, endpoint, SSH public key and three passwords. Press Enter to keep
-defaults; ports and internal domains are available under additional settings.
-Review the settings before applying them.
+Run this command as root on your VPS. The wizard asks for your VPN purpose,
+endpoint, SSH public key and three passwords. Press Enter to keep defaults;
+ports and internal domains are available under additional settings. Review the
+settings before applying them.
+
+The downloaded bootstrap has its official release tag embedded in it. It
+verifies that SSH-signed tag and checks out its exact commit. For a reproducible,
+version-pinned installation, use the
+[verified installation](docs/getting-started.md#verified-installation). For
+reruns, recovery, or upgrades, use the same pinned tag and follow
+[UPGRADE.md](UPGRADE.md).
 
 Piping to Bash trusts the HTTPS source of the script you execute. Prefer
 verification before execution? Follow the [verified installation](docs/getting-started.md#verified-installation).

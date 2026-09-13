@@ -15,11 +15,15 @@ def tool_argv(name, root):
 
 
 @pytest.mark.parametrize("tool", TOOLS)
-def test_tool(tool, deployment_repo, command):
+def test_tool(tool, deployment_repo, command, request):
     argv = tool_argv(tool, deployment_repo)
     if tool == "bash-syntax":
         # bash -n with multiple filenames only parses the first one.
         for script in argv[2:]:
             command(("bash", "-n", script), cwd=deployment_repo)
     else:
-        command(argv, cwd=deployment_repo)
+        env = None
+        if tool == "ssot":
+            fixture = request.getfixturevalue("release_status_fixture")
+            env = {"VERIFY_SSOT_RELEASE_STATUS_FIXTURE": str(fixture)}
+        command(argv, cwd=deployment_repo, env=env)

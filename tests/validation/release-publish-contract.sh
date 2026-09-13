@@ -43,6 +43,13 @@ case "${1:-} ${2:-}" in
     'auth status') exit 0 ;;
     'repo view') printf 'NikitaS2001/vps-nook\n' ;;
     'api --method') printf '%s\n' "${IMMUTABLE_ENABLED}" ;;
+    'api /repos/NikitaS2001/vps-nook/releases/latest')
+        if [[ "${PUBLISH_MODE}" == latest-mismatch ]]; then
+            printf 'v1.2.9\n'
+        else
+            printf 'v1.3.0\n'
+        fi
+        ;;
     'release view') printf 'v1.3.0\n' ;;
     'release download')
         while (($#)); do
@@ -99,11 +106,20 @@ run_fixture() {
             [[ -s "${published}" ]] || fail 'post-publish fixture never published'
             ! grep -Fq 'release delete' "${log}" || fail 'publisher deleted after publication'
             ;;
+        latest-mismatch)
+            ((status != 0)) || fail 'latest release mismatch passed'
+            [[ -s "${published}" ]] || fail 'latest mismatch fixture never published'
+            grep -Fq 'api /repos/NikitaS2001/vps-nook/releases/latest' "${log}" \
+                || fail 'publisher skipped latest release verification'
+            ! grep -Fq 'release delete' "${log}" || fail 'publisher deleted after latest mismatch'
+            ;;
         success)
             ((status == 0)) || fail 'valid publication failed'
             [[ -s "${published}" ]] || fail 'valid publication did not publish'
             grep -Fq 'release verify v1.3.0' "${log}" \
                 || fail 'valid publication skipped release verification'
+            grep -Fq 'api /repos/NikitaS2001/vps-nook/releases/latest' "${log}" \
+                || fail 'valid publication skipped latest release verification'
             ! grep -Fq 'release delete' "${log}" || fail 'valid publication deleted release'
             ;;
     esac
@@ -114,9 +130,10 @@ run_fixture wrong-repository true https://github.com/example/other.git
 run_fixture immutable-disabled false "${canonical}"
 run_fixture attestation-failure true "${canonical}"
 run_fixture post-publish-failure true "${canonical}"
+run_fixture latest-mismatch true "${canonical}"
 run_fixture success true "${canonical}"
 
 ! grep -En 'GH_TOKEN=|github_pat_|secrets\.' "${ROOT_DIR}/scripts/publish-release.sh" >/dev/null \
     || fail 'publisher contains stored-token plumbing'
-printf '[PASS] repository, immutability, attestation, monotonicity, and success fixtures\n'
+printf '[PASS] repository, immutability, attestation, latest selection, monotonicity, and success fixtures\n'
 printf 'RELEASE PUBLISH CONTRACT PASS\n'
