@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 import shlex
 import sys
-from os import environ
+from os import environ, readlink
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -52,6 +52,25 @@ def read_override(variable: str, relative: str) -> str:
     except (OSError, UnicodeError) as error:
         errors.append(f"cannot read {variable}={path}: {error}")
         return ""
+
+
+alias = root / "CLAUDE.md"
+canonical = root / "AGENTS.md"
+try:
+    valid_alias = (
+        alias.is_symlink()
+        and readlink(alias) == "AGENTS.md"
+        and not canonical.is_symlink()
+        and canonical.is_file()
+        and alias.resolve(strict=True) == canonical
+    )
+except (OSError, RuntimeError):
+    valid_alias = False
+check(valid_alias, "CLAUDE.md must be a relative symlink to the regular repository-root AGENTS.md")
+if errors:
+    for error in errors:
+        print(f"[FAIL] {error}", file=sys.stderr)
+    sys.exit(1)
 
 
 def github_slug(heading: str) -> str:

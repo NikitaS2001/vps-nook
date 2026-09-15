@@ -57,6 +57,23 @@ def snapshot(source, destination):
         src, dst = source / relative, destination / relative
         if not src.exists() and not src.is_symlink():
             continue
+        if src.is_symlink():
+            try:
+                canonical = source / "AGENTS.md"
+                valid_alias = (
+                    relative == Path("CLAUDE.md")
+                    and os.readlink(src) == "AGENTS.md"
+                    and b"AGENTS.md" in paths
+                    and not canonical.is_symlink()
+                    and canonical.is_file()
+                    and src.resolve(strict=True) == source.resolve() / "AGENTS.md"
+                )
+            except (OSError, RuntimeError):
+                valid_alias = False
+            if not valid_alias:
+                raise CommandFailure("source snapshot refuses symlinks outside regular source files")
+            dst.symlink_to("AGENTS.md")
+            continue
         # Reject symlink traversal rather than copying external operator material.
         if src.is_symlink() or source.resolve() not in src.resolve().parents:
             raise CommandFailure("source snapshot refuses symlinks outside regular source files")

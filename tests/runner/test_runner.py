@@ -241,6 +241,89 @@ def test_snapshot_preserves_dirty_sources_excludes_secrets(tmp_path, detached):
     assert subprocess.check_output(["git", "-C", str(result), "tag", "--list"]).strip() == b"fixture-baseline"
 
 
+@pytest.mark.parametrize("tracked", [False, True])
+def test_snapshot_preserves_guidance_alias(tmp_path, tracked):
+    source = tmp_path / "source"
+    source.mkdir()
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(source), *args])
+    git("init", "-q")
+    (source / "AGENTS.md").write_bytes(b"# Shared guidance\n")
+    if tracked:
+        (source / "CLAUDE.md").symlink_to("AGENTS.md")
+    git("add", ".")
+    git("-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
+        "commit", "-qm", "fixture")
+    if not tracked:
+        (source / "CLAUDE.md").symlink_to("AGENTS.md")
+    result = snapshot(source, tmp_path / "copy")
+    alias = result / "CLAUDE.md"
+    assert alias.is_symlink()
+    assert os.readlink(alias) == "AGENTS.md"
+    assert alias.resolve(strict=True) == result / "AGENTS.md"
+    assert alias.read_bytes() == (source / "AGENTS.md").read_bytes()
+    assert subprocess.check_output(["git", "-C", str(result), "ls-files", "--stage", "--", "CLAUDE.md"]).startswith(b"120000 ")
+    assert subprocess.check_output(["git", "-C", str(result), "show", ":CLAUDE.md"]) == b"AGENTS.md"
+
+
+@pytest.mark.parametrize("case", ["wrong", "absolute", "escaping", "noncanonical", "other", "missing",
+                                 "symlinked-canonical", "ignored-canonical"])
+def test_snapshot_rejects_unsafe_guidance_alias(tmp_path, case):
+    source = tmp_path / "source"
+    source.mkdir()
+    def git(*args):
+        subprocess.run(["git", "-C", str(source), *args], check=True, capture_output=True)
+    git("init", "-q")
+    (source / "README.md").write_text("ordinary sentinel\n")
+    git("add", ".")
+    git("-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
+        "commit", "-qm", "fixture")
+    canonical = source / "AGENTS.md"
+    if case == "symlinked-canonical":
+        canonical.symlink_to("README.md")
+    elif case != "missing":
+        canonical.write_text("shared guidance\n")
+    if case == "ignored-canonical":
+        (source / ".gitignore").write_text("/AGENTS.md\n")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "AGENTS.md").write_text("external sentinel\n")
+    target = {"wrong": "README.md", "absolute": str(canonical), "escaping": "../outside/AGENTS.md",
+              "noncanonical": "./AGENTS.md"}.get(case, "AGENTS.md")
+    (source / ("OTHER.md" if case == "other" else "CLAUDE.md")).symlink_to(target)
+    with pytest.raises(CommandFailure, match="^source snapshot refuses symlinks outside regular source files$"):
+        snapshot(source, tmp_path / "copy")
+
+
+@pytest.mark.parametrize("case", ["missing", "regular", "wrong", "absolute", "escaping", "self-loop"])
+def test_ssot_rejects_invalid_guidance_alias(private_repo, tmp_path, case):
+    alias = private_repo / "CLAUDE.md"
+    assert alias.is_symlink() and os.readlink(alias) == "AGENTS.md"
+    alias.unlink()
+    sentinel = "PRIVATE_ALIAS_TARGET_SENTINEL"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "AGENTS.md").write_text(sentinel)
+    if case == "regular":
+        alias.write_text(sentinel)
+    elif case != "missing":
+        target = {"wrong": "README.md", "absolute": str(private_repo / "AGENTS.md"),
+                  "escaping": "../outside/AGENTS.md", "self-loop": "CLAUDE.md"}[case]
+        alias.symlink_to(target)
+    env = {key: value for key, value in os.environ.items() if key != "VERIFY_SSOT_README_PATH"}
+    try:
+        result = subprocess.run(["bash", "scripts/verify-ssot.sh"], cwd=private_repo, env=env,
+                                stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
+        assert result.returncode == 1
+        assert result.stderr == b"[FAIL] CLAUDE.md must be a relative symlink to the regular repository-root AGENTS.md\n"
+        assert sentinel.encode() not in result.stdout + result.stderr
+        assert b"Traceback" not in result.stdout + result.stderr
+    finally:
+        if alias.exists() or alias.is_symlink():
+            alias.unlink()
+        alias.symlink_to("AGENTS.md")
+
+
 def test_snapshot_ignores_repository_git_environment(tmp_path, monkeypatch):
     source = tmp_path / "source"
     source.mkdir()
