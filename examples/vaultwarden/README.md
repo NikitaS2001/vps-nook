@@ -88,14 +88,6 @@ Vaultwarden must be merged into the one project at `/opt/vps-nook`. The source
 recipe is a fragment, while the installed override must contain one shared
 `services:` mapping with all operator-added services.
 
-On the VPS, create the persistent and Caddy-extension directories first:
-
-```bash
-sudo install -d -m 0755 \
-  /opt/vps-nook/volumes/vaultwarden \
-  /opt/vps-nook/Caddyfile.d
-```
-
 Stop before changing anything if a Vaultwarden service is already effective or
 if the target Caddy fragment already exists. The following check deliberately
 also stops when the existing override cannot be rendered: repair or review the
@@ -117,9 +109,29 @@ if [[ -f docker-compose.override.yml ]]; then
     exit 1
   fi
 fi
-if [[ -e Caddyfile.d/vaultwarden.conf || -L Caddyfile.d/vaultwarden.conf ]]; then
+if sudo test -e /opt/vps-nook/Caddyfile.d/vaultwarden.conf ||
+  sudo test -L /opt/vps-nook/Caddyfile.d/vaultwarden.conf
+then
   echo 'Caddyfile.d/vaultwarden.conf already exists; inspect it. Nothing was changed.' >&2
   exit 1
+fi
+
+for directory in /opt/vps-nook/volumes/vaultwarden /opt/vps-nook/Caddyfile.d; do
+  if sudo test -L "${directory}" || { sudo test -e "${directory}" && ! sudo test -d "${directory}"; }; then
+    echo "${directory} must be a real directory when it already exists. Nothing was changed." >&2
+    exit 1
+  fi
+done
+
+if ! sudo test -e /opt/vps-nook/volumes/vaultwarden &&
+  ! sudo test -L /opt/vps-nook/volumes/vaultwarden
+then
+  sudo install -d -m 0755 /opt/vps-nook/volumes/vaultwarden
+fi
+if ! sudo test -e /opt/vps-nook/Caddyfile.d &&
+  ! sudo test -L /opt/vps-nook/Caddyfile.d
+then
+  sudo install -d -m 0755 /opt/vps-nook/Caddyfile.d
 fi
 ```
 
@@ -297,15 +309,27 @@ backup if data rollback is required.
 
 ## Remove the service without destroying data
 
-First create and verify an encrypted off-host backup. Remove only the complete
-`services.vaultwarden` mapping from `/opt/vps-nook/docker-compose.override.yml`
-and only `/opt/vps-nook/Caddyfile.d/vaultwarden.conf`; use `sudoedit` for the
-mapping and inspect the resulting YAML. Then reconcile Compose and rerun the
-same verified installer or controller playbook described above so Caddy again
-uses its validated transaction:
+First create and verify an encrypted off-host backup. Use `sudoedit` to remove
+only the complete `services.vaultwarden` mapping from
+`/opt/vps-nook/docker-compose.override.yml`; do not alter other service
+mappings or top-level settings. Inspect the resulting YAML and choose exactly
+one valid shared-override state:
+
+- If other services remain, retain their `services:` mapping unchanged.
+- If Vaultwarden was the last service but needed top-level settings remain, use
+  `services: {}` explicitly.
+- If Vaultwarden was the last service and no needed top-level settings remain,
+  remove `/opt/vps-nook/docker-compose.override.yml` entirely.
+
+Do not leave a bare `services:` key with a null value. Only after selecting one
+of those states, remove `/opt/vps-nook/Caddyfile.d/vaultwarden.conf`, validate
+the resulting Compose configuration, reconcile it, and rerun the same verified
+installer or controller playbook described above so Caddy again uses its
+validated transaction:
 
 ```bash
 cd /opt/vps-nook
+sudo rm /opt/vps-nook/Caddyfile.d/vaultwarden.conf
 sudo docker compose config -q
 sudo docker compose up -d --remove-orphans
 ```
