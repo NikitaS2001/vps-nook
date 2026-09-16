@@ -2,6 +2,12 @@
 
 Notable changes are recorded here. The project follows Semantic Versioning.
 
+## Unreleased
+
+- Organize operator-owned service recipes under `examples/<service>/`, with a complete Vaultwarden installation and lifecycle guide.
+- Pin the Vaultwarden image by tag and OCI index digest, close registration by default, and validate the recipe in the quick gate.
+- Clarify shared Compose override merging and the extension backup allowlist.
+
 ## [v2.0.0] - 2026-09-13
 
 - Rename the project to VPS Nook, with NOOK_* inputs and new server paths.

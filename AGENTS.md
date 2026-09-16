@@ -40,7 +40,7 @@ Service state defaults to `/opt/vps-nook`; encrypted installer inputs live in `/
 | Installer | `install.sh`, `tests/installer/`, relevant validation contracts, `docs/getting-started.md`, `docs/configuration.md` |
 | Live operations | Matching `scripts/backup.sh`, `scripts/restore.sh` or `scripts/synthetic-check.sh` and `docs/operations.md` |
 | Releases | Release scripts, `.github/workflows/release.yml`, `docs/releasing.md`; complete acceptance before tagging, then use the publisher script for the verified draft |
-| Private extensions | `docs/extensions.md`, `examples/`; keep Compose/Caddy extensions private and digest-pinned |
+| Private extensions | `docs/extensions.md`, `examples/README.md`, `examples/<service>/README.md` (service procedure owner), `tests/validation/examples-contract.sh` |
 
 ## Required constraints
 
@@ -50,6 +50,8 @@ Service state defaults to `/opt/vps-nook`; encrypted installer inputs live in `/
 - Bash uses strict mode, quoted expansions, command arrays, private temporary files and trap cleanup/rollback. Never trace credentials or suppress failures.
 - Credentials belong in whole-file encrypted vaults; the services vault must be a regular non-symlink file with mode `0600`. Ordinary variables reference `vault_*`; plaintext `admin_password` and `wg_easy_admin_password` are rejected. Never log secrets, hashes or generated extra-vars.
 - Keep image digests, upstream checksums, Python/collection pins and GitHub Action SHA pins consistent. Public input changes require defaults, argument specs/preflight, examples, role references and contracts together.
+- Private extensions remain operator-owned, outside the supported core service set, and private/digest-pinned. Follow `examples/README.md`: one `examples/<service>/` directory per recipe; keep service procedures in that service's README.
+- Deploy extensions into the shared Compose project by merging into the single `/opt/vps-nook/docker-compose.override.yml`; never overwrite an existing override. Keep persistent service state under `volumes/<service>`; `docs/extensions.md` and `scripts/backup.sh` own the exact backup boundary.
 - Installer: root and apt required; interactive execution needs `/dev/tty`; automation uses `NOOK_NONINTERACTIVE=1`. `NOOK_DEV_MODE=1` source overrides are only for disposable tests. Preserve pinned signer, annotated-tag verification, exact-SHA `ansible-pull`, authoritative encrypted rerun state and secret cleanup; never weaken signature or host-key checks.
 - Follow `UPGRADE.md`: no v1 in-place upgrade/restore or legacy `ZERO_TRUST_*` inputs/paths. Backup quiesces Compose and defaults to age encryption (`AGE_KEY`); restore validates extraction/readiness with rollback.
 - Keep real inventory, vaults, `.vault_password`, logs, volumes, fetched certificates and `.venv` untracked. Provider firewall/routing and rescue access remain operator responsibilities.
@@ -63,10 +65,12 @@ The default `quick` stage includes `tests/contracts/test_tools.py`: Bash syntax,
 | --- | --- |
 | Documentation/instructions only | Targeted structural checks, then `scripts/check.sh` |
 | Roles, scripts or contracts | Focused affected pytest cases, then `scripts/check.sh` |
-| Compose/service mode | `scripts/check.sh --e2e` (quick, then services-mode QEMU) |
+| Core Compose/service mode | `scripts/check.sh --e2e` (quick, then services-mode QEMU) |
+| Published service recipes only (no core runtime changes) | Focused `examples-contract` pytest case, then `scripts/check.sh`; operator smoke test on a confirmed disposable VPS when available |
 | SSH/UFW recovery or cutover | Focused checks and quick, then `pytest -m remote` |
 | Lifecycle/restore or release | Focused checks and quick, corresponding `-m lifecycle`/`-m release`, or `scripts/check.sh --release` (quick, QEMU, lifecycle, remaining release contracts) |
 
+- Compose rendering and Caddy parser validation do not prove a recipe's UI/bootstrap behavior. Explicitly record an unavailable disposable-VPS operator smoke test as not run; recipe-only checks never replace required core runtime gates.
 - Pytest is sequential; never use xdist. Explicit `-m` replaces default `quick`; `pytest --collect-only` runs no subprocesses or deployment preparation. Register new Bash contracts in `tests/registry.py`, not another dispatcher; keep registry, wrapper, pre-commit and workflow gates aligned.
 - Fixtures preserve history/tags and dirty source in private snapshots, excluding ignored operator files. Create deployment examples there, never in the checkout. Quick checks never invoke host sudo; missing prerequisites, including Docker Compose where required, fail rather than skip.
 - Prove affected behavior, idempotency, failure propagation and rollback; no percentage-coverage gate. Native PTY/mocked-systemd tests do not replace real provisioning/SSH checks. VM success does not prove provider networking; `tests/ansible-pull-smoke.yml` proves only localhost inventory resolution.
