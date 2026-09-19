@@ -5,7 +5,7 @@
 # Usage:
 #   tests/e2e/qemu-install.sh [--reboot-test] [--client-test]
 #       [--idempotency-test] [--bootstrap-timeout-test]
-#       [--stopped-container-test] [--invalid-caddy-test]
+#       [--stopped-container-test] [--invalid-caddy-test] [--vaultwarden-test]
 #
 # Env:
 #   QEMU_IMAGE       cloud image URL or local .img/.qcow2 path
@@ -30,6 +30,7 @@ E2E_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INTERNAL_DOMAIN_SUFFIX="${INTERNAL_DOMAIN_SUFFIX:-internal}"
 WG_INTERNAL_DOMAIN="${WG_INTERNAL_DOMAIN:-wg.${INTERNAL_DOMAIN_SUFFIX}}"
 ADGUARD_INTERNAL_DOMAIN="${ADGUARD_INTERNAL_DOMAIN:-adguard.${INTERNAL_DOMAIN_SUFFIX}}"
+VAULTWARDEN_INTERNAL_DOMAIN="vw.${INTERNAL_DOMAIN_SUFFIX}"
 # shellcheck disable=SC1091
 # shellcheck source=tests/e2e/common.sh
 source "${E2E_DIR}/common.sh"
@@ -74,6 +75,26 @@ build_installer_credential_env() {
     esac
 }
 
+build_vaultwarden_command() {
+    local command="$1" quoted word
+    local result=""
+    shift
+    local -a words=(
+        sudo
+        /opt/vps-nook-installer/repo/examples/vaultwarden/manage.sh
+        "${command}"
+        "$@"
+        --project-root
+        /opt/vps-nook
+    )
+
+    for word in "${words[@]}"; do
+        printf -v quoted '%q' "${word}"
+        result+="${result:+ }${quoted}"
+    done
+    printf '%s\n' "${result}"
+}
+
 if [[ ${1:-} == --self-test-source-list ]]; then
     [[ $# -eq 2 && -d $2 ]] || fail '--self-test-source-list requires one directory'
     list_existing_source_paths "$2"
@@ -88,6 +109,11 @@ if [[ ${1:-} == --self-test-installer-env ]]; then
     [[ $# -eq 2 ]] || fail '--self-test-installer-env requires fresh or existing'
     build_installer_credential_env "$2" "admin'secret" 'adguard secret' "wg\$secret" \
         'ssh-ed25519 AAAA fixture'
+    exit 0
+fi
+if [[ ${1:-} == --self-test-vaultwarden-command ]]; then
+    [[ $# -ge 2 ]] || fail '--self-test-vaultwarden-command requires a command'
+    build_vaultwarden_command "${@:2}"
     exit 0
 fi
 
@@ -116,6 +142,7 @@ DO_IDEMPOTENCY=false
 DO_BOOTSTRAP_TIMEOUT=false
 DO_STOPPED_CONTAINER=false
 DO_INVALID_CADDY=false
+DO_VAULTWARDEN=false
 for arg in "$@"; do
     case "${arg}" in
         --reboot-test) DO_REBOOT=true ;;
@@ -124,6 +151,7 @@ for arg in "$@"; do
         --bootstrap-timeout-test) DO_BOOTSTRAP_TIMEOUT=true ;;
         --stopped-container-test) DO_STOPPED_CONTAINER=true ;;
         --invalid-caddy-test) DO_INVALID_CADDY=true; DO_IDEMPOTENCY=true ;;
+        --vaultwarden-test) DO_VAULTWARDEN=true; DO_CLIENT_TEST=true ;;
         *) fail "Unknown argument: ${arg}" ;;
     esac
 done
@@ -223,6 +251,50 @@ run_repository_installer() {
     # Callers intentionally use this function in an if/pipeline, disabling
     # errexit within it. Provenance checks must not mask a failed installer.
     return "${installer_status}"
+}
+
+run_vaultwarden_manager() {
+    local target="$1" port="$2" key="$3"
+    shift 3
+    local vaultwarden_command
+    vaultwarden_command="$(build_vaultwarden_command "$@")"
+    run_remote "${target}" "${port}" "${key}" "${vaultwarden_command}"
+}
+
+verify_vaultwarden_clean_state() {
+    local target="$1" port="$2" key="$3"
+    # shellcheck disable=SC2016
+    run_remote "${target}" "${port}" "${key}" \
+        'sudo sh -eu -c '"'"'
+            for path in \
+                /opt/vps-nook/docker-compose.override.yml \
+                /opt/vps-nook/Caddyfile.d/vaultwarden.conf \
+                /opt/vps-nook/volumes/vaultwarden; do
+                test ! -e "$path"
+            done
+            ! docker container inspect vaultwarden >/dev/null 2>&1
+        '"'"''
+}
+
+verify_vaultwarden_targets() {
+    local target="$1" port="$2" key="$3"
+    # shellcheck disable=SC2016
+    run_remote "${target}" "${port}" "${key}" \
+        'sudo sh -eu -c '"'"'
+            test -f /opt/vps-nook/docker-compose.override.yml
+            test ! -L /opt/vps-nook/docker-compose.override.yml
+            test -f /opt/vps-nook/Caddyfile.d/vaultwarden.conf
+            test ! -L /opt/vps-nook/Caddyfile.d/vaultwarden.conf
+            test -d /opt/vps-nook/volumes/vaultwarden
+            test ! -L /opt/vps-nook/volumes/vaultwarden
+            docker container inspect vaultwarden >/dev/null
+        '"'"''
+}
+
+vaultwarden_core_container_ids() {
+    local target="$1" port="$2" key="$3"
+    run_remote "${target}" "${port}" "${key}" \
+        'sudo docker inspect --format "{{.Name}}={{.Id}}" wg-easy adguard caddy'
 }
 
 verify_wg_login() {
@@ -440,6 +512,62 @@ verify_bootstrap_secret_free \
     "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519"
 echo "[E2E] wg-easy login and secret scrub verified"
 
+if [[ "${DO_VAULTWARDEN}" == "true" ]]; then
+    vaultwarden_target="sysadmin@127.0.0.1"
+    echo "[E2E] Installing Vaultwarden through the operator recipe..."
+    run_remote "${vaultwarden_target}" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
+        'sudo test -x /opt/vps-nook-installer/repo/examples/vaultwarden/manage.sh'
+    verify_vaultwarden_clean_state \
+        "${vaultwarden_target}" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519"
+    vaultwarden_core_ids_before="$(vaultwarden_core_container_ids \
+        "${vaultwarden_target}" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519")"
+    run_vaultwarden_manager \
+        "${vaultwarden_target}" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" check
+    verify_vaultwarden_clean_state \
+        "${vaultwarden_target}" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519"
+    [[ "$(vaultwarden_core_container_ids "${vaultwarden_target}" "${QEMU_ADMIN_PORT}" \
+        "${TMP_DIR}/id_ed25519")" == "${vaultwarden_core_ids_before}" ]] || \
+        fail "Vaultwarden check changed a core container"
+
+    vaultwarden_install_status=0
+    run_vaultwarden_manager \
+        "${vaultwarden_target}" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" install || \
+        vaultwarden_install_status=$?
+    [[ "${vaultwarden_install_status}" -eq 0 ]] || \
+        fail "Vaultwarden clean install failed with status ${vaultwarden_install_status}"
+    run_vaultwarden_manager \
+        "${vaultwarden_target}" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" verify
+    verify_vaultwarden_targets \
+        "${vaultwarden_target}" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519"
+    [[ "$(vaultwarden_core_container_ids "${vaultwarden_target}" "${QEMU_ADMIN_PORT}" \
+        "${TMP_DIR}/id_ed25519")" == "${vaultwarden_core_ids_before}" ]] || \
+        fail "Vaultwarden install recreated a core container"
+
+    vaultwarden_container_id_before="$(run_remote \
+        "${vaultwarden_target}" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
+        'sudo docker inspect vaultwarden --format "{{.Id}}"')"
+    run_vaultwarden_manager \
+        "${vaultwarden_target}" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" install --resume
+    run_vaultwarden_manager \
+        "${vaultwarden_target}" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" verify
+    [[ "$(run_remote "${vaultwarden_target}" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
+        'sudo docker inspect vaultwarden --format "{{.Id}}"')" == "${vaultwarden_container_id_before}" ]] || \
+        fail "Vaultwarden exact resume recreated the container"
+    copy_repo_to_guest \
+        "${vaultwarden_target}" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519"
+
+    echo "[E2E] Activating the Vaultwarden Caddy fragment through the installer..."
+    run_repository_installer \
+        "${vaultwarden_target}" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" existing
+    verify_deployment \
+        "${vaultwarden_target}" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519"
+    run_vaultwarden_manager \
+        "${vaultwarden_target}" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" install --resume
+    run_vaultwarden_manager \
+        "${vaultwarden_target}" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" verify
+    echo "[E2E] Vaultwarden recipe and installer-owned Caddy activation verified"
+fi
+
 if [[ "${DO_STOPPED_CONTAINER}" == "true" ]]; then
     stopped_log="${TMP_DIR}/stopped-container.log"
     if ! run_remote "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" \
@@ -472,6 +600,12 @@ if [[ "${DO_REBOOT}" == "true" ]]; then
     verify_deployment "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519"
     verify_traffic_mode "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" \
         "${TMP_DIR}/id_ed25519" "${WG_TRAFFIC_MODE}"
+    if [[ "${DO_VAULTWARDEN}" == "true" ]]; then
+        run_vaultwarden_manager \
+            "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" install --resume
+        run_vaultwarden_manager \
+            "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" verify
+    fi
     echo "[E2E] Reboot survival verified"
 fi
 
@@ -480,8 +614,12 @@ if [[ "${DO_CLIENT_TEST}" == "true" ]]; then
     run_remote "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
         'sudo apt-get update -qq >/dev/null && sudo apt-get install -y -qq wireguard-tools jq openssl dnsutils resolvconf >/dev/null'
     echo "[E2E] Running the in-guest WireGuard client handshake test..."
+    vaultwarden_client_env=""
+    if [[ "${DO_VAULTWARDEN}" == "true" ]]; then
+        vaultwarden_client_env="VAULTWARDEN_INTERNAL_DOMAIN='${VAULTWARDEN_INTERNAL_DOMAIN}' "
+    fi
     run_remote_stdin "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
-        "sudo WG_PASSWORD='${WG_PASS}' WG_PORT='${E2E_WG_PORT}' WG_TRAFFIC_MODE='${WG_TRAFFIC_MODE}' WG_INTERNAL_DOMAIN='${WG_INTERNAL_DOMAIN}' ADGUARD_INTERNAL_DOMAIN='${ADGUARD_INTERNAL_DOMAIN}' bash -s" \
+        "sudo WG_PASSWORD='${WG_PASS}' WG_PORT='${E2E_WG_PORT}' WG_TRAFFIC_MODE='${WG_TRAFFIC_MODE}' WG_INTERNAL_DOMAIN='${WG_INTERNAL_DOMAIN}' ADGUARD_INTERNAL_DOMAIN='${ADGUARD_INTERNAL_DOMAIN}' ${vaultwarden_client_env}bash -s" \
         < "${SOURCE_DIR}/tests/e2e/client-in-guest.sh"
 fi
 
@@ -536,6 +674,12 @@ if [[ "${DO_IDEMPOTENCY}" == "true" ]]; then
     verify_wg_login "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519"
     verify_bootstrap_secret_free \
         "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519"
+    if [[ "${DO_VAULTWARDEN}" == "true" ]]; then
+        run_vaultwarden_manager \
+            "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" install --resume
+        run_vaultwarden_manager \
+            "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" verify
+    fi
     echo "[E2E] Completed rerun preserved wg-easy identity and credentials"
 
     caddy_managed_hash_before="$(run_remote "sysadmin@127.0.0.1" \

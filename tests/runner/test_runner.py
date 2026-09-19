@@ -571,7 +571,8 @@ def test_provenance(command, tmp_path):
 def test_vm_gate_flags_are_preserved():
     gates = {case.id: set(case.argv[2:]) for case in VMS}
     assert gates["qemu-services"] == {"--client-test", "--idempotency-test", "--reboot-test",
-                                       "--bootstrap-timeout-test", "--stopped-container-test", "--invalid-caddy-test"}
+                                       "--bootstrap-timeout-test", "--stopped-container-test", "--invalid-caddy-test",
+                                       "--vaultwarden-test"}
     assert gates["remote-ssh"] == {"--ssh-rollback-test", "--ssh-cutover-test", "--reboot-test",
                                    "--ufw-backend-failure-test"}
     assert gates["lifecycle-upgrade-restore"] == set()
