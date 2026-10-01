@@ -23,5 +23,16 @@ grep -Fq 'ping -I zt-e2e' "${CLIENT}"
 grep -Fq 'WireGuard client could not establish a handshake' "${CLIENT}"
 grep -Fq 'ip6tables -C FORWARD -i wg0 -j WG_CLIENTS' "${COMMON}"
 grep -Fq "WG_PORT='\${E2E_WG_PORT}' WG_TRAFFIC_MODE='\${WG_TRAFFIC_MODE}'" "${QEMU}"
+grep -Fq -- '--vaultwarden-test) DO_VAULTWARDEN=true; DO_CLIENT_TEST=true ;;' "${QEMU}"
+# shellcheck disable=SC2016
+grep -Fq 'VAULTWARDEN_INTERNAL_DOMAIN='"'"'${VAULTWARDEN_INTERNAL_DOMAIN}'"'"'' "${QEMU}"
+# shellcheck disable=SC2016
+grep -Fq 'VAULTWARDEN_INTERNAL_DOMAIN="${VAULTWARDEN_INTERNAL_DOMAIN:-}"' "${CLIENT}"
+# shellcheck disable=SC2016
+grep -Fq 'dig +short @10.66.0.2 "${VAULTWARDEN_INTERNAL_DOMAIN}" A' "${CLIENT}"
+grep -Fq -- '--interface zt-e2e --connect-timeout 8 --max-time 15' "${CLIENT}"
+# shellcheck disable=SC2016
+grep -Fq -- '--cacert "${ROOT_CA}"' "${CLIENT}"
+grep -Fq 'reachable through WireGuard with trusted root CA' "${CLIENT}"
 
 printf 'qemu-packet-contract: strict IPv4 and environment-qualified IPv6 packet assertions wired PASS\n'

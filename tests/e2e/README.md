@@ -14,7 +14,7 @@ After bootstrapping, activate `.venv` and select one suite:
 
 | Command | Scenarios |
 | --- | --- |
-| `pytest -m qemu` | Services installation with all six flags listed below |
+| `pytest -m qemu` | Services installation with all seven flags listed below |
 | `pytest -m remote` | Real SSH rollback/cutover, UFW failure and reboot |
 | `pytest -m lifecycle` | Baseline/current/rerun/encrypted restore |
 
@@ -34,6 +34,15 @@ tests/e2e/qemu-install.sh \
   --client-test --idempotency-test --reboot-test
 ```
 
+Target the Vaultwarden operator smoke path directly:
+
+```bash
+tests/e2e/qemu-install.sh --vaultwarden-test --reboot-test
+```
+
+It proves hardened `sysadmin` SSH, `sudo manage.sh`, installer-owned Caddy
+activation, and Vaultwarden trusted HTTPS through the in-guest WireGuard client.
+
 Before provisioning, the harness runs the installer dialogue through a real
 `sudo` pipeline and PTY as the guest's unprivileged cloud user. Provisioning
 functions are stubbed for this dialogue check; it verifies root execution,
@@ -50,6 +59,7 @@ Supported flags:
 | `--bootstrap-timeout-test` | Interrupted initial wg-easy readiness and recoverable rerun |
 | `--stopped-container-test` | Readiness failure when a managed service is stopped |
 | `--invalid-caddy-test` | Invalid and reload-failing Caddy candidates preserve active state |
+| `--vaultwarden-test` | Clean Vaultwarden recipe check/install/exact resume, installer Caddy activation, and trusted HTTPS through WireGuard |
 
 Environment controls include `QEMU_IMAGE`, `QEMU_USER`, `INSTALL_REF`,
 `E2E_SOURCE_MODE`, `NOOK_WG_TRAFFIC_MODE`, guest service ports, and host
@@ -64,6 +74,12 @@ tests/e2e/qemu-install.sh --client-test --idempotency-test
 `NOOK_WG_TRAFFIC_MODE=full` requires IPv4 egress. A dual-stack test
 environment additionally exercises IPv6 routing; IPv4-only hosts generate
 IPv4-only full-tunnel profiles.
+
+The Vaultwarden path proves real Compose health, private/no-port runtime through
+`manage.sh verify`, AdGuard DNS, WireGuard routing, the Caddy root CA, and a
+2xx/3xx response from `vw.<suffix>` after reboot and installer rerun. It does
+not prove provider firewall/external routing or Vaultwarden account, UI, login,
+logout, or vault-item semantics.
 
 ## Remote controller guest
 
@@ -135,12 +151,16 @@ drift and adds the lifecycle upgrade/restore scenario on Ubuntu. Public-IPv6
 packet proof for `full` is a manual dual-stack scenario because generic
 GitHub-hosted runners do not guarantee IPv6 egress.
 
-The pytest QEMU gate includes repository-installer Caddy failure scenarios.
-Remote SSH/UFW negative cases are available through `pytest -m remote`; they are
-not part of routine CI or the `check.sh --release` sequence. Run them when a change
-touches the corresponding boundary and report the exact scenarios that completed.
-Persist logs only in a
-private evidence directory and scan them for credentials before sharing.
+The pytest QEMU gate includes repository-installer Caddy failure scenarios and
+the operator-owned Vaultwarden recipe smoke path. Its private guest state,
+`nook-pytest-logs.*` diagnostics, and sentinel cleanup remain pytest-owned.
+For direct failure diagnosis only, set `E2E_KEEP_STATE_ON_FAILURE=1` with an
+empty private `QEMU_STATE_DIR`; remove retained state after stopping the owned
+VM. Remote SSH/UFW negative cases are available through `pytest -m remote`;
+they are not part of routine CI or the `check.sh --release` sequence. Run them
+when a change touches the corresponding boundary and report the exact scenarios
+that completed. Persist logs only in a private evidence directory and scan them
+for credentials before sharing.
 
 The provider firewall remains the operator's responsibility. Keep console or
 rescue access during every real deployment.

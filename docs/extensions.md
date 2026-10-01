@@ -15,6 +15,16 @@ top-level settings. Never copy a fragment over an existing override. If the
 service key or target Caddy fragment already exists, stop and reconcile its
 configuration and state before proceeding.
 
+Published recipes provide the mandatory four-command
+[`manage.sh` interface](../examples/README.md#executable-contract): `check`,
+`install`, `bootstrap`, and `verify`, executed only in a VPS root shell.
+They use the shipped Compose/Caddy fragments as configuration sources of truth,
+never rewrite an existing shared override, and never reload Caddy themselves.
+Exit 3 requests an operator merge followed by exact `install --resume` adoption.
+Ansible retains transactional Caddy activation; Nook's existing scripts retain
+backup/restore ownership. Update and removal remain reviewed service README
+procedures, not manager commands.
+
 Minimal Compose fragment:
 
 ```yaml
