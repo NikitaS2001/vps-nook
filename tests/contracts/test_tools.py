@@ -6,7 +6,7 @@ TOOLS = ("bash-syntax", "shellcheck", "ansible-syntax", "ansible-lint", "yamllin
 
 def tool_argv(name, root):
     scripts = ["install.sh"] + [str(p.relative_to(root)) for pattern in
-               ("scripts/*.sh", "tests/validation/*.sh", "tests/e2e/*.sh") for p in sorted(root.glob(pattern))]
+               ("scripts/*.sh", "tests/validation/*.sh", "tests/e2e/*.sh", "examples/*/manage.sh") for p in sorted(root.glob(pattern))]
     return {"bash-syntax": ("bash", "-n", *scripts), "shellcheck": ("shellcheck", *scripts),
             "ansible-syntax": ("ansible-playbook", "--syntax-check", "site.yml"),
             "ansible-lint": ("ansible-lint", "--strict"), "yamllint": ("yamllint", "."),

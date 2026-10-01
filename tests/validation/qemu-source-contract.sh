@@ -17,12 +17,24 @@ git -C "${TMP_DIR}" -c user.name=test -c user.email=test.invalid -c commit.gpgsi
     commit -qm fixture
 find "${TMP_DIR}/deleted" -delete
 printf 'untracked\n' >"${TMP_DIR}/untracked"
+mkdir -p "${TMP_DIR}/examples/vaultwarden"
+printf 'recipe\n' >"${TMP_DIR}/examples/vaultwarden/README.md"
+printf 'recipe\n' >"${TMP_DIR}/examples/vaultwarden/compose.override.yml"
+printf 'recipe\n' >"${TMP_DIR}/examples/vaultwarden/Caddyfile.conf"
+printf '#!/usr/bin/env bash\n' >"${TMP_DIR}/examples/vaultwarden/manage.sh"
+chmod 0755 "${TMP_DIR}/examples/vaultwarden/manage.sh"
 
 mapfile -d '' -t paths < <(
     "${ROOT_DIR}/tests/e2e/qemu-install.sh" --self-test-source-list "${TMP_DIR}"
 )
 printf '%s\n' "${paths[@]}" | sort >"${TMP_DIR}/actual"
-printf '%s\n' kept untracked >"${TMP_DIR}/expected"
+printf '%s\n' \
+    examples/vaultwarden/Caddyfile.conf \
+    examples/vaultwarden/README.md \
+    examples/vaultwarden/compose.override.yml \
+    examples/vaultwarden/manage.sh \
+    kept \
+    untracked | sort >"${TMP_DIR}/expected"
 cmp "${TMP_DIR}/expected" "${TMP_DIR}/actual" || {
     printf 'qemu-source-contract: source list included a deletion or lost an existing path\n' >&2
     exit 1
@@ -63,7 +75,22 @@ existing_env="$("${ROOT_DIR}/tests/e2e/qemu-install.sh" --self-test-installer-en
     printf 'qemu-source-contract: existing-state rerun exposed credential inputs\n' >&2
     exit 1
 }
-[[ "$(grep -c 'id_ed25519" existing' "${ROOT_DIR}/tests/e2e/qemu-install.sh")" -eq 3 ]] || {
+vaultwarden_check="$("${ROOT_DIR}/tests/e2e/qemu-install.sh" --self-test-vaultwarden-command check)"
+[[ "${vaultwarden_check}" == "sudo /opt/vps-nook-installer/repo/examples/vaultwarden/manage.sh check --project-root /opt/vps-nook" ]] || {
+    printf 'qemu-source-contract: Vaultwarden check command is not installer-managed and safely quoted\n' >&2
+    exit 1
+}
+vaultwarden_resume="$("${ROOT_DIR}/tests/e2e/qemu-install.sh" --self-test-vaultwarden-command install --resume)"
+[[ "${vaultwarden_resume}" == "sudo /opt/vps-nook-installer/repo/examples/vaultwarden/manage.sh install --resume --project-root /opt/vps-nook" ]] || {
+    printf 'qemu-source-contract: Vaultwarden resume command is not installer-managed and safely quoted\n' >&2
+    exit 1
+}
+grep -Fq 'ipv4_address: 10.66.0.5' \
+    "${ROOT_DIR}/examples/vaultwarden/compose.override.yml" || {
+    printf 'qemu-source-contract: Vaultwarden must reserve a non-core VPN address\n' >&2
+    exit 1
+}
+[[ "$(grep -c 'id_ed25519" existing' "${ROOT_DIR}/tests/e2e/qemu-install.sh")" -eq 4 ]] || {
     printf 'qemu-source-contract: retry paths are not explicitly existing-state reruns\n' >&2
     exit 1
 }

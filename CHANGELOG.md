@@ -7,6 +7,7 @@ Notable changes are recorded here. The project follows Semantic Versioning.
 - Organize operator-owned service recipes under `examples/<service>/`, with a complete Vaultwarden installation and lifecycle guide.
 - Pin the Vaultwarden image by tag and OCI index digest, close registration by default, and validate the recipe in the quick gate.
 - Clarify shared Compose override merging and the extension backup allowlist.
+- Standardize executable recipe commands; add Vaultwarden preflight, exact install/resume, supervised registration closure and runtime verification.
 
 ## [v2.0.0] - 2026-09-13
 

@@ -22,6 +22,7 @@ CLIENT_NAME="e2e-client-$(date +%s)"
 UI_PORT="${UI_PORT:-51821}"
 WG_DOMAIN="${WG_INTERNAL_DOMAIN:-wg.internal}"
 CADDY_IP="${CADDY_IP:-10.66.0.3}"
+VAULTWARDEN_INTERNAL_DOMAIN="${VAULTWARDEN_INTERNAL_DOMAIN:-}"
 API_CLIENT_ID=""
 
 command -v curl >/dev/null || { echo "[FAIL] curl is required" >&2; exit 1; }
@@ -300,6 +301,34 @@ if ! curl -fsS --resolve "${ADGUARD_INTERNAL_DOMAIN:-adguard.internal}:443:10.66
 fi
 echo "[PASS] https://${ADGUARD_INTERNAL_DOMAIN:-adguard.internal} reachable (trusted root CA)"
 
+if [[ -n "${VAULTWARDEN_INTERNAL_DOMAIN}" ]]; then
+    vaultwarden_dns="$(dig +short @10.66.0.2 "${VAULTWARDEN_INTERNAL_DOMAIN}" A | tr -d '\r\n')"
+    [[ "${vaultwarden_dns}" == "${CADDY_IP}" ]] || {
+        echo "[FAIL] ${VAULTWARDEN_INTERNAL_DOMAIN} did not resolve to Caddy through AdGuard" >&2
+        exit 1
+    }
+    # The server's Docker bridge owns 10.66.0.0/24 locally. A host-side
+    # client must override that route so this request traverses WireGuard.
+    ip route replace "${CADDY_IP}/32" dev zt-e2e
+    vaultwarden_ready=false
+    vaultwarden_status=000
+    for _ in $(seq 1 15); do
+        if vaultwarden_status="$(curl -sS --noproxy '*' --interface zt-e2e --connect-timeout 8 --max-time 15 \
+            --resolve "${VAULTWARDEN_INTERNAL_DOMAIN}:443:${CADDY_IP}" --cacert "${ROOT_CA}" \
+            -o /dev/null -w '%{http_code}' "https://${VAULTWARDEN_INTERNAL_DOMAIN}/" 2>/dev/null)" \
+            && [[ "${vaultwarden_status}" =~ ^[23][0-9]{2}$ ]]; then
+            vaultwarden_ready=true
+            break
+        fi
+        sleep 2
+    done
+    [[ "${vaultwarden_ready}" == true ]] || {
+        echo "[FAIL] https://${VAULTWARDEN_INTERNAL_DOMAIN} did not return 2xx/3xx through WireGuard (last HTTP ${vaultwarden_status})" >&2
+        exit 1
+    }
+    echo "[PASS] https://${VAULTWARDEN_INTERNAL_DOMAIN} reachable through WireGuard with trusted root CA"
+fi
+
 probe_public_egress() {
     local family="$1" endpoint="$2"
     curl "-${family}" --noproxy '*' --interface zt-e2e --connect-timeout 8 --max-time 15 \
@@ -340,7 +369,9 @@ fi
 
 echo "--- diagnostics: private CA, local domains, WireGuard handshake ---"
 echo "DNS resolution via AdGuard (10.66.0.2):"
-for d in "${WG_INTERNAL_DOMAIN:-wg.internal}" "${ADGUARD_INTERNAL_DOMAIN:-adguard.internal}"; do
+domains=("${WG_INTERNAL_DOMAIN:-wg.internal}" "${ADGUARD_INTERNAL_DOMAIN:-adguard.internal}")
+[[ -z "${VAULTWARDEN_INTERNAL_DOMAIN}" ]] || domains+=("${VAULTWARDEN_INTERNAL_DOMAIN}")
+for d in "${domains[@]}"; do
     echo "  ${d} -> $(dig +short @10.66.0.2 "${d}" | tr '\n' ' ')"
 done
 echo "Private root CA fetched from the server:"
@@ -351,6 +382,13 @@ echo | openssl s_client -connect 10.66.0.3:443 -servername "${WG_INTERNAL_DOMAIN
     -CAfile "${ROOT_CA}" 2>/dev/null \
     | openssl x509 -noout -subject -issuer -dates -ext subjectAltName 2>/dev/null \
     || echo "  cannot inspect the served certificate"
+if [[ -n "${VAULTWARDEN_INTERNAL_DOMAIN}" ]]; then
+    echo "Certificate served by Caddy for ${VAULTWARDEN_INTERNAL_DOMAIN}:"
+    echo | openssl s_client -connect "${CADDY_IP}:443" -servername "${VAULTWARDEN_INTERNAL_DOMAIN}" \
+        -CAfile "${ROOT_CA}" 2>/dev/null \
+        | openssl x509 -noout -subject -issuer -dates -ext subjectAltName 2>/dev/null \
+        || echo "  cannot inspect the served certificate"
+fi
 echo "WireGuard client interface (handshake / transfer):"
 wg show | grep -E 'interface:|handshake:|transfer:' || true
 

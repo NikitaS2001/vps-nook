@@ -36,7 +36,7 @@ CONTRACTS = (
 VMS = (
     Case("qemu-services", ("qemu",), ("bash", "tests/e2e/qemu-install.sh",
          "--client-test", "--idempotency-test", "--reboot-test", "--bootstrap-timeout-test",
-         "--stopped-container-test", "--invalid-caddy-test"), 4200),
+         "--stopped-container-test", "--invalid-caddy-test", "--vaultwarden-test"), 4200),
     Case("lifecycle-upgrade-restore", ("lifecycle",), ("bash", "tests/e2e/lifecycle-qemu.sh"), 4800),
     Case("remote-ssh", ("remote",), ("bash", "tests/e2e/qemu-remote-install.sh",
          "--ssh-rollback-test", "--ssh-cutover-test", "--reboot-test", "--ufw-backend-failure-test"), 4200),
