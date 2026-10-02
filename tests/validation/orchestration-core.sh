@@ -38,4 +38,16 @@ for module in iptable_filter ip6table_filter iptable_nat ip6table_nat xt_MASQUER
     grep -q "^[[:space:]]*- ${module}$" "${ROLE}/tasks/netfilter_modules.yml"
 done
 
+grep -q '^wg_amnezia_enabled: false$' "${ROLE}/defaults/main.yml"
+grep -q 'modinfo' "${ROLE}/tasks/main.yml"
+grep -q 'wg_amnezia_kernel_module' "${ROLE}/tasks/netfilter_modules.yml"
+if grep -R -q -E 'dkms|kernel-mgmt|make -C' "${ROLE}/tasks"; then
+  echo 'role must not build kernel modules' >&2
+  exit 1
+fi
+grep -q 'OVERRIDE_AUTO_AWG' "${ROLE}/templates/docker-compose.yml.j2"
+grep -q 'vps_orchestration_wg_executable' "${ROLE}/tasks/traffic_mode.yml"
+grep -q 'vps_orchestration_wg_executable' "${ROLE}/tasks/verify.yml"
+grep -q 'WG_EXEC' "${ROOT}/scripts/synthetic-check.sh"
+
 printf '[PASS] argument_specs, FQCN, vault-only bootstrap, private volumes, host netfilter, minimal container capabilities, transaction boundaries\n'
