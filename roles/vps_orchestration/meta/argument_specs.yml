@@ -10,6 +10,9 @@ argument_specs:
         type: str
         choices: [services, full]
         default: services
+      wg_amnezia_enabled:
+        type: bool
+        default: false
       docker_network_subnet:
         type: str
         default: 10.66.0.0/24

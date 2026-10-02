@@ -50,6 +50,26 @@
     fail_msg: "wg_traffic_mode must be exactly services or full"
   tags: [compose, traffic_mode]
 
+- name: "VPS Orchestration | Preflight | Validate AmneziaWG module state"
+  ansible.builtin.command:
+    argv: [modinfo, "{{ wg_amnezia_kernel_module }}"]
+  register: vps_orchestration_amnezia_modinfo
+  changed_when: false
+  failed_when: false
+  when: wg_amnezia_enabled | bool
+  tags: [compose, traffic_mode]
+
+- name: "VPS Orchestration | Preflight | Require AmneziaWG kernel module availability"
+  ansible.builtin.assert:
+    that:
+      - vps_orchestration_amnezia_modinfo.rc == 0
+    fail_msg: >-
+      wg_amnezia_enabled is set but modinfo {{ wg_amnezia_kernel_module }}
+      failed on this host; install the module before deployment
+      (see docs/operations.md)
+  when: wg_amnezia_enabled | bool
+  tags: [compose, traffic_mode]
+
 - name: "VPS Orchestration | Preflight | Validate traffic subnets"
   ansible.builtin.command:
     argv:

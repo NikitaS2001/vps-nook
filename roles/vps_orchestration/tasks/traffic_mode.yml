@@ -174,7 +174,7 @@
       PY
       }
       for attempt in $(seq 1 {{ vps_orchestration_traffic_mode_readiness_retries }}); do
-        if timeout 10 docker exec wg-easy wg show wg0 >/dev/null; then
+        if timeout 10 docker exec wg-easy {{ vps_orchestration_wg_executable }} show wg0 >/dev/null; then
           if [[ {{ wg_traffic_mode | quote }} == services ]]; then
             timeout 10 docker exec wg-easy iptables -C FORWARD -i wg0 -j WG_CLIENTS \
               && timeout 10 docker exec wg-easy ip6tables -C FORWARD -i wg0 -j WG_CLIENTS \

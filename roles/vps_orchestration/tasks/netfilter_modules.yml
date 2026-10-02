@@ -7,6 +7,25 @@
     cache_valid_time: 3600
   tags: [docker, compose, traffic_mode]
 
+- name: "Netfilter | Runtime | Load and persist the AmneziaWG kernel module"
+  community.general.modprobe:
+    name: "{{ wg_amnezia_kernel_module }}"
+    state: present
+    persistent: present
+  register: vps_orchestration_amnezia_module
+  when: wg_amnezia_enabled | bool
+  tags: [docker, compose, traffic_mode]
+
+- name: "Netfilter | Runtime | Fail closed when AmneziaWG was requested but unavailable"
+  ansible.builtin.assert:
+    that:
+      - vps_orchestration_amnezia_module is not failed
+    fail_msg: >-
+      wg_amnezia_enabled is set but the {{ wg_amnezia_kernel_module }} kernel
+      module could not be loaded; install it and retry (see docs/operations.md)
+  when: wg_amnezia_enabled | bool
+  tags: [docker, compose, traffic_mode]
+
 - name: "Netfilter | Runtime | Load and persist wg-easy legacy iptables modules"
   community.general.modprobe:
     name: "{{ item }}"

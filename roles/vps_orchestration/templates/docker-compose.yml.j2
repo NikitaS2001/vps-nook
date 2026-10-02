@@ -24,6 +24,12 @@ services:
       # and the panel itself is password-protected by the INIT_* setup.
       INSECURE: "true"
       DISABLE_IPV6: "false"
+{% if (wg_amnezia_enabled | default(false) | bool) %}
+      # AmneziaWG is selected explicitly because the container cannot inspect
+      # host kernel modules; the host module is asserted during preflight.
+      EXPERIMENTAL_AWG: "true"
+      OVERRIDE_AUTO_AWG: {{ wg_amnezia_overrided_executable | string | to_json }}
+{% endif %}
 {% if (wg_easy_include_init | default(false) | bool) %}
       # First-start only: wg-easy consumes the INIT_* variables during its
       # initial setup and ignores them afterwards. They are rendered only until
