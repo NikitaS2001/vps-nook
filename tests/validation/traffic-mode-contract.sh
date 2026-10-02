@@ -50,7 +50,7 @@ case "${1:-}" in
     ;;
   exec)
     shift 2
-    if [[ "$*" == "wg show wg0" ]]; then
+    if [[ "$*" == "wg show wg0" || "$*" == "awg show wg0" ]]; then
       [[ ! -e "${TRAFFIC_TEST_FAIL_READINESS:-/nonexistent}" ]]
       exit
     fi
@@ -122,6 +122,12 @@ cat >"${TMP}/playbook.yml" <<YAML
     wg_services_only_ipv4_destinations: ["10.8.0.0/24", "10.66.0.2/32", "10.66.0.3/32"]
     wg_services_only_ipv6_destinations: ["fd42:42:42::/64"]
     vps_orchestration_traffic_mode_readiness_retries: 1
+    wg_amnezia_enabled: false
+    wg_amnezia_overrided_executable: awg
+    # Mirrors the role default; this contract imports task files directly and
+    # therefore does not load role defaults.
+    vps_orchestration_wg_executable: >-
+      {{ wg_amnezia_overrided_executable if wg_amnezia_enabled | bool else 'wg' }}
   tasks:
     - ansible.builtin.import_tasks: "${ROOT}/roles/vps_orchestration/tasks/traffic_mode.yml"
 YAML
@@ -207,6 +213,23 @@ ansible-playbook "${TMP}/playbook.yml" \
   -e vps_orchestration_full_ipv6_enabled=false >"${TMP}/full-ipv4-only.log"
 [[ "$(<"${PROJECT}/.wg-traffic-mode")" == full ]]
 [[ "$(read_policy)" == '{"client": null, "firewall": 0, "routes": ["0.0.0.0/0"]}' ]]
+
+# An AmneziaWG host owns the interface through awg; readiness must query it
+# there because plain `wg show wg0` reports "Not supported" for such interfaces.
+amnezia_exec_before="$(grep -Ec '^docker exec ' "${LOG}" || true)"
+ansible-playbook "${TMP}/playbook.yml" \
+  -e wg_amnezia_enabled=true -e wg_traffic_mode=full >"${TMP}/amnezia.log"
+grep -Fq 'docker exec wg-easy awg show wg0' "${LOG}"
+if [[ "$(grep -Ec '^docker exec ' "${LOG}" || true)" -le "${amnezia_exec_before}" ]]; then
+  echo 'AmneziaWG run skipped live validation entirely' >&2
+  exit 1
+fi
+[[ "$(<"${PROJECT}/.wg-traffic-mode")" == full ]]
+ansible-playbook "${TMP}/playbook.yml" -e wg_traffic_mode=full >"${TMP}/amnezia-rerun.log"
+if grep -Fq 'docker exec wg-easy awg show wg0' "${TMP}/amnezia-rerun.log"; then
+  echo 'non-AmneziaWG run still queried the awg executable' >&2
+  exit 1
+fi
 
 cp "${DB}" "${TMP}/before-post-marker-fault.db"
 post_marker_db_sha="$(sha256sum "${DB}" | cut -d' ' -f1)"
@@ -343,11 +366,12 @@ source=Path(os.environ["TRAFFIC_TASK"]).read_text()
 for forbidden in ("DOCKER-USER", "POSTROUTING", "systemctl", "traffic-mode-firewall"):
     if forbidden in source:
         raise SystemExit(f"obsolete host policy remains: {forbidden}")
-for required in ("firewall_enabled", "WG_CLIENTS", "wg show wg0"):
+for required in ("firewall_enabled", "WG_CLIENTS", "vps_orchestration_wg_executable"):
     if required not in source:
         raise SystemExit(f"missing pre-NAT policy invariant: {required}")
 PY
 
+printf '[PASS] amneziawg=live_readiness_uses_awg_executable; plain_mode_uses_wg\n'
 printf '[PASS] services=private_routes,firewall_enabled,WG_CLIENTS_v4_v6_terminal_drop\n'
 printf '[PASS] full=default_routes,firewall_disabled\n'
 printf '[PASS] marker_drift=reconciled_from_database\n'
