@@ -35,6 +35,15 @@ esac
 
 WG_INTERNAL_DOMAIN="${WG_INTERNAL_DOMAIN:-wg.internal}"
 ADGUARD_INTERNAL_DOMAIN="${ADGUARD_INTERNAL_DOMAIN:-adguard.internal}"
+# Plain `wg show wg0` fails with "Not supported" on an AmneziaWG interface, so
+# pick the executable that actually owns the interface.
+if docker exec wg-easy wg show wg0 >/dev/null 2>&1; then
+    WG_EXEC=wg
+elif docker exec wg-easy awg show wg0 >/dev/null 2>&1; then
+    WG_EXEC=awg
+else
+    WG_EXEC=wg
+fi
 CADDY_IP="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' caddy 2>/dev/null || true)"
 
 fail() { echo "[FAIL] $*" >&2; exit 1; }
@@ -59,8 +68,8 @@ wg_session_status="$(curl -sS -o /dev/null -w '%{http_code}' \
     http://127.0.0.1:51821/api/session 2>/dev/null || true)"
 [[ "${wg_session_status}" == "401" ]] || \
     fail "wg-easy /api/session returned '${wg_session_status}', expected 401"
-docker exec wg-easy wg show >/dev/null 2>&1 || fail "wg-easy wg show failed"
-echo "[OK] wg-easy authentication and WireGuard interface ready"
+docker exec wg-easy "${WG_EXEC}" show >/dev/null 2>&1 || fail "wg-easy ${WG_EXEC} show failed"
+echo "[OK] wg-easy authentication and WireGuard interface ready (${WG_EXEC})"
 
 echo "== HTTPS via Caddy (internal CA) =="
 [[ -n "${CADDY_IP}" ]] || fail "could not determine the Caddy container IP"
@@ -73,7 +82,7 @@ for d in "${WG_INTERNAL_DOMAIN}" "${ADGUARD_INTERNAL_DOMAIN}"; do
 done
 
 echo "== WireGuard handshake freshness =="
-latest="$(docker exec wg-easy wg show wg0 latest-handshakes 2>/dev/null | awk '{print $2}' | sort -rn | head -1 || true)"
+latest="$(docker exec wg-easy "${WG_EXEC}" show wg0 latest-handshakes 2>/dev/null | awk '{print $2}' | sort -rn | head -1 || true)"
 now="$(date +%s)"
 if [[ -n "${latest}" ]] && [[ $((now - latest)) -lt 3600 ]]; then
     echo "[OK] recent WireGuard handshake (<= 1h)"
