@@ -44,6 +44,19 @@ egress, full-mode profiles omit `::/0`, leaving client IPv6 outside the VPN.
 Transitions are transactional and require updated client profiles. There is no
 `wg_enable_ipv6` input.
 
+## AmneziaWG
+
+Set `wg_amnezia_enabled: true` to run the tunnel on AmneziaWG instead of plain
+WireGuard. It changes the wire protocol, so every client needs a refreshed
+profile and an AmneziaWG-capable client application.
+
+The host kernel module is a prerequisite: the role asserts it with `modinfo`,
+loads and persists it with `modprobe`, and fails closed when it is missing. It
+does not build kernel modules. See
+[operations](operations.md#amneziawg-kernel-module) for installation. wg-easy
+receives `EXPERIMENTAL_AWG`/`OVERRIDE_AUTO_AWG` so it selects AmneziaWG without
+inspecting host modules; the container gets no `/lib/modules` mount.
+
 ## Ports and identity
 
 Review these values before the first run:

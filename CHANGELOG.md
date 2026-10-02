@@ -4,6 +4,7 @@ Notable changes are recorded here. The project follows Semantic Versioning.
 
 ## Unreleased
 
+- Add optional AmneziaWG support through `wg_amnezia_enabled`: assert and persist the host kernel module, select it in wg-easy without a `/lib/modules` mount, and use `awg` for live interface checks.
 - Organize operator-owned service recipes under `examples/<service>/`, with a complete Vaultwarden installation and lifecycle guide.
 - Pin the Vaultwarden image by tag and OCI index digest, close registration by default, and validate the recipe in the quick gate.
 - Clarify shared Compose override merging and the extension backup allowlist.

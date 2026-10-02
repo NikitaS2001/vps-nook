@@ -115,6 +115,29 @@ Do not restart Caddy directly after editing a site. Rerun Ansible so the role
 validates the complete candidate, activates it, and rolls back on reload
 failure.
 
+## AmneziaWG kernel module
+
+`wg_amnezia_enabled` requires the `amneziawg` kernel module; the role loads and
+persists it but never builds one. Build it on the host with the headers for the
+running kernel, then enable the input and rerun Ansible:
+
+```bash
+uname -r
+sudo modinfo amneziawg   # must resolve before enabling
+```
+
+Keep the module version aligned with the `amneziawg-tools` build inside the
+pinned wg-easy image, and rebuild after every kernel upgrade. Diagnostics:
+
+```bash
+lsmod | grep amneziawg
+sudo docker exec wg-easy awg show wg0   # jc/jmin/jmax/s1/s2/h1..h4 must appear
+```
+
+Plain `wg show wg0` returns `Not supported` for an AmneziaWG interface. Use
+`awg` when troubleshooting; the role and `scripts/synthetic-check.sh` select the
+executable automatically.
+
 ## Removing the deployment
 
 There is no automated uninstall. First verify an off-host backup and restore a

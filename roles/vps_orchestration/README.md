@@ -14,6 +14,7 @@ upstream artifacts are in [`defaults/main.yml`](defaults/main.yml).
 | --- | --- | --- |
 | `project_root` | `/opt/vps-nook` | Managed Compose, Caddy, and service-data root |
 | `wg_traffic_mode` | `services` | Server-enforced `services` or IPv4 `full` policy with optional IPv6 |
+| `wg_amnezia_enabled` | `false` | Run the wg-easy tunnel on AmneziaWG; requires the host kernel module |
 | `docker_network_subnet` | `10.66.0.0/24` | Private service IPv4 network |
 | `docker_network_ipv6_subnet` | `fd00:67:0:0::/64` | Private service IPv6 network |
 | `wg_vpn_subnet` | `10.8.0.0/24` | WireGuard client IPv4 network |
@@ -54,6 +55,11 @@ it is stopped, and restore the snapshot if activation or readiness fails.
 - The exact IPv4/IPv6 netfilter modules used by wg-easy are loaded and
   persisted on the host. A kernel that does not provide them is rejected;
   wg-easy keeps only the `NET_ADMIN` capability.
+- With `wg_amnezia_enabled`, the `amneziawg` kernel module is loaded and
+  persisted, wg-easy is told to select AmneziaWG explicitly, and live
+  interface checks use `awg`. The role asserts the module exists and fails
+  closed otherwise; it never builds a kernel module or mounts host
+  `/lib/modules` into the container.
 - The fetched internal root CA is written to the configured controller
   destination.
 

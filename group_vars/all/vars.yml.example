@@ -1,6 +1,9 @@
 ---
 # Network
 wg_traffic_mode: "services"
+# AmneziaWG (obfuscated WireGuard). Requires the host kernel module; see
+# docs/operations.md. Off by default.
+# wg_amnezia_enabled: true
 ssh_port: 2222
 wg_port: 51820
 wg_container_port: 51820
