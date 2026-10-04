@@ -61,6 +61,9 @@ WG_PASSWORD=""
 WG_HOST=""
 WG_TRAFFIC_MODE="services"
 WG_TRAFFIC_MODE_INPUT=""
+VPN_BACKEND="wg"
+VPN_BACKEND_INPUT=""
+WG_AMNEZIA_ENABLED="false"
 INTERNAL_DOMAIN_SUFFIX=""
 NONINTERACTIVE=""
 REUSE_INSTALLER_STATE=false
@@ -188,6 +191,7 @@ Non-interactive mode for automated testing:
                                auto-detected when omitted)
   NOOK_WG_TRAFFIC_MODE   VPN routing: services or full
                           (optional, default services)
+  NOOK_VPN_BACKEND       VPN backend: wg or awg (optional, default wg)
 
 On rerun, the encrypted installer state is authoritative. Omit credential
 inputs; any supplied non-secret input must match its persisted value.
@@ -321,6 +325,14 @@ validate_traffic_mode() {
     case "${WG_TRAFFIC_MODE}" in
         services|full) ;;
         *) error "NOOK_WG_TRAFFIC_MODE must be services or full." ;;
+    esac
+}
+
+validate_vpn_backend() {
+    case "${VPN_BACKEND}" in
+        wg) WG_AMNEZIA_ENABLED=false ;;
+        awg) WG_AMNEZIA_ENABLED=true ;;
+        *) error "NOOK_VPN_BACKEND must be wg or awg." ;;
     esac
 }
 
@@ -768,6 +780,22 @@ choose_traffic_mode() {
     WG_TRAFFIC_MODE_INPUT="${WG_TRAFFIC_MODE}"
 }
 
+choose_vpn_backend() {
+    local selection
+    printf '\n  1  WireGuard [default]\n  2  AmneziaWG\n'
+    printf '     Requires an operator-prepared AmneziaWG kernel module and matching client.\n\n'
+    while true; do
+        prompt_choice selection "VPN backend (1 or 2)" "$([[ ${VPN_BACKEND} == awg ]] && echo 2 || echo 1)"
+        case "${selection}" in
+            1) VPN_BACKEND=wg; break ;;
+            2) VPN_BACKEND=awg; break ;;
+            *) warn "Choose 1 or 2." ;;
+        esac
+    done
+    VPN_BACKEND_INPUT="${VPN_BACKEND}"
+    validate_vpn_backend
+}
+
 advanced_configuration() {
     local previous_suffix="${INTERNAL_DOMAIN_SUFFIX}"
     prompt_validated SSH_PORT "SSH port" "${SSH_PORT}" validate_port "SSH port"
@@ -785,6 +813,7 @@ confirm_configuration() {
     local action field
     while true; do
         printf '\n  Ready to install\n\n'
+        printf '  VPN backend    %s\n' "${VPN_BACKEND}"
         printf '  Release        %s\n  VPN mode       %s\n  Endpoint       %s\n' "${RELEASE_REF}" "${WG_TRAFFIC_MODE}" "${WG_HOST}"
         printf '  Administrator  %s\n  SSH            TCP %s\n  WireGuard      UDP %s\n' "${ADMIN_USER}" "${SSH_PORT}" "${WG_PORT}"
         printf '  Internal sites %s\n\n' "${INTERNAL_DOMAINS}"
@@ -799,6 +828,7 @@ confirm_configuration() {
                 fi
                 printf '\n  1 VPN mode   2 Endpoint   3 SSH key   4 Admin password\n'
                 printf '  5 AdGuard password   6 WireGuard password   7 Advanced settings\n'
+                printf '  8 VPN backend\n'
                 prompt_choice field "Field to edit" 1
                 case "${field}" in
                     1) choose_traffic_mode ;;
@@ -808,7 +838,8 @@ confirm_configuration() {
                     5) prompt_required_secret ADGUARD_PASSWORD "AdGuard password" 8 72 ;;
                     6) prompt_required_secret WG_PASSWORD "WireGuard panel password" 12 ;;
                     7) advanced_configuration ;;
-                    *) warn "Choose a field from 1 to 7." ;;
+                    8) choose_vpn_backend ;;
+                    *) warn "Choose a field from 1 to 8." ;;
                 esac
                 ;;
             c|C) warn "Cancelled. Server roles were not applied; source-verification packages may remain installed."; exit 130 ;;
@@ -827,6 +858,7 @@ collect_configuration() {
     fi
 
     stage "Step 1 of 4 - Network"
+    choose_vpn_backend
     choose_traffic_mode
     WG_HOST="$(detect_public_ip)"
     prompt_validated WG_HOST "Public WireGuard hostname or IPv4" "${WG_HOST}" validate_endpoint
@@ -899,6 +931,9 @@ collect_configuration_noninteractive() {
     fi
     WG_TRAFFIC_MODE_INPUT="${NOOK_WG_TRAFFIC_MODE:-}"
     WG_TRAFFIC_MODE="${WG_TRAFFIC_MODE_INPUT:-services}"
+    VPN_BACKEND_INPUT="${NOOK_VPN_BACKEND:-}"
+    VPN_BACKEND="${VPN_BACKEND_INPUT:-wg}"
+    validate_vpn_backend
     SSH_PORT="${NOOK_SSH_PORT:-}"
     WG_PORT="${NOOK_WG_PORT:-}"
     ADMIN_USER="${NOOK_ADMIN_USER:-}"
@@ -991,6 +1026,7 @@ write_extra_var() {
 
 write_installer_inputs() {
     write_extra_var wg_traffic_mode "${WG_TRAFFIC_MODE}"
+    write_extra_var wg_amnezia_enabled "${WG_AMNEZIA_ENABLED}"
     write_extra_var vps_services_vault_path "${VAULT_FILE}"
 }
 
@@ -1051,9 +1087,12 @@ try:
     vault = yaml.load(sys.stdin, Loader=UniqueKeyLoader)
 except (TypeError, yaml.YAMLError):
     sys.exit(1)
-if not isinstance(vault, dict) or set(vault) != schema:
+if not isinstance(vault, dict) or set(vault) not in (schema, schema | {"wg_amnezia_enabled"}):
     sys.exit(1)
 if not all(isinstance(value, str) for value in vault.values()):
+    sys.exit(1)
+backend = vault.get("wg_amnezia_enabled", "false")
+if backend not in ("false", "true"):
     sys.exit(1)
 if vault["ansible_connection"] != "local":
     sys.exit(1)
@@ -1071,6 +1110,7 @@ if not vault["vault_admin_ssh_pubkey"]:
     sys.exit(1)
 for key in order:
     print(vault[key])
+print(backend)
 ' "${VAULT_FILE}"
 }
 
@@ -1091,11 +1131,12 @@ load_installer_inputs() {
     local persisted_ssh_port persisted_wg_port persisted_wg_container_port
     local persisted_admin_user persisted_wg_host persisted_wg_domain
     local persisted_adguard_domain persisted_domain_suffix persisted_traffic
+    local persisted_backend
 
     serialized_inputs="$(read_installer_vault_inputs)" \
         || error "Existing installer vault has duplicate or missing persisted inputs."
     mapfile -t persisted_inputs <<<"${serialized_inputs}"
-    [[ "${#persisted_inputs[@]}" -eq 9 ]] \
+    [[ "${#persisted_inputs[@]}" -eq 10 ]] \
         || error "Existing installer vault has an invalid persisted input schema."
     persisted_ssh_port="${persisted_inputs[0]}"
     persisted_wg_port="${persisted_inputs[1]}"
@@ -1106,6 +1147,11 @@ load_installer_inputs() {
     persisted_adguard_domain="${persisted_inputs[6]}"
     persisted_domain_suffix="${persisted_inputs[7]}"
     persisted_traffic="${persisted_inputs[8]}"
+    case "${persisted_inputs[9]}" in
+        false) persisted_backend=wg ;;
+        true) persisted_backend=awg ;;
+        *) error "Existing installer vault has an invalid VPN backend." ;;
+    esac
 
     for persisted_input in "${persisted_inputs[@]}"; do
         [[ -n "${persisted_input}" ]] \
@@ -1122,6 +1168,7 @@ load_installer_inputs() {
     reject_changed_installer_input adguard_internal_domain "${ADGUARD_INTERNAL_DOMAIN}" "${persisted_adguard_domain}"
     reject_changed_installer_input internal_domain_suffix "${INTERNAL_DOMAIN_SUFFIX}" "${persisted_domain_suffix}"
     reject_changed_installer_input wg_traffic_mode "${WG_TRAFFIC_MODE_INPUT}" "${persisted_traffic}"
+    reject_changed_installer_input vpn_backend "${VPN_BACKEND_INPUT}" "${persisted_backend}"
 
     SSH_PORT="${persisted_ssh_port}"
     WG_PORT="${persisted_wg_port}"
@@ -1132,6 +1179,8 @@ load_installer_inputs() {
     INTERNAL_DOMAINS="${persisted_wg_domain} ${persisted_adguard_domain}"
     INTERNAL_DOMAIN_SUFFIX="${persisted_domain_suffix}"
     WG_TRAFFIC_MODE="${persisted_traffic}"
+    VPN_BACKEND="${persisted_backend}"
+    validate_vpn_backend
 
     validate_port "Persisted SSH port" "${SSH_PORT}"
     validate_port "Persisted WireGuard port" "${WG_PORT}"
@@ -1156,7 +1205,7 @@ resolve_effective_installer_inputs() {
     for effective_input in \
         "${SSH_PORT}" "${WG_PORT}" "${ADMIN_USER}" "${WG_HOST}" \
         "${WG_INTERNAL_DOMAIN}" "${ADGUARD_INTERNAL_DOMAIN}" \
-        "${INTERNAL_DOMAIN_SUFFIX}" "${WG_TRAFFIC_MODE}"; do
+        "${INTERNAL_DOMAIN_SUFFIX}" "${WG_TRAFFIC_MODE}" "${VPN_BACKEND}"; do
         [[ -n "${effective_input}" ]] \
             || error "Could not resolve the effective installer inputs."
     done
@@ -1167,6 +1216,7 @@ resolve_effective_installer_inputs() {
     validate_internal_domains "${INTERNAL_DOMAINS}"
     validate_internal_domain_suffix "${INTERNAL_DOMAIN_SUFFIX}" "${INTERNAL_DOMAINS}"
     validate_traffic_mode
+    validate_vpn_backend
 }
 
 fsync_path() {
@@ -1285,17 +1335,32 @@ create_installer_vault() {
     validate_installer_vault || error "Persisted installer vault failed verification."
 }
 
+require_selected_backend() {
+    local module
+
+    validate_vpn_backend
+    [[ "${VPN_BACKEND}" == awg ]] || return 0
+    module="$(read_yaml_scalar_default "${REPO_DIR}/roles/vps_orchestration/defaults/main.yml" wg_amnezia_kernel_module)"
+    [[ "${module}" =~ ^[A-Za-z0-9_][A-Za-z0-9_-]*$ ]] \
+        || error "Verified role defaults contain an invalid AmneziaWG module name."
+    command -v modinfo >/dev/null 2>&1 \
+        || error "modinfo is required to check the prepared AmneziaWG kernel module."
+    timeout "${VAULT_COMMAND_TIMEOUT}" modinfo "${module}" >/dev/null 2>&1 \
+        || error "AmneziaWG kernel module ${module} is unavailable; prepare it before installing."
+}
+
 prepare_installer_vault() {
     acquire_installer_lock
     if [[ -e "${VAULT_MARKER}" || -L "${VAULT_MARKER}" ]]; then
         vault_file_is_private "${VAULT_MARKER}" || error "Installer vault marker is not a private owner-controlled regular file."
         if validate_installer_vault; then
-            rm -f -- "${VAULT_MARKER}"
-            fsync_path "${VAULT_DIR}"
             load_installer_inputs
             unset ADMIN_PASSWORD ADGUARD_PASSWORD WG_PASSWORD SSH_PUBKEY
             unset INHERITED_ADMIN_PASSWORD INHERITED_ADGUARD_PASSWORD INHERITED_WG_PASSWORD INHERITED_SSH_PUBKEY
+            require_selected_backend
             require_traffic_egress
+            rm -f -- "${VAULT_MARKER}"
+            fsync_path "${VAULT_DIR}"
             return
         fi
         error "Interrupted installer vault transaction is incomplete or invalid; committed paths were preserved for manual recovery."
@@ -1308,15 +1373,20 @@ prepare_installer_vault() {
         load_installer_inputs
         unset ADMIN_PASSWORD ADGUARD_PASSWORD WG_PASSWORD SSH_PUBKEY
         unset INHERITED_ADMIN_PASSWORD INHERITED_ADGUARD_PASSWORD INHERITED_WG_PASSWORD INHERITED_SSH_PUBKEY
+        require_selected_backend
         require_traffic_egress
         return
     fi
+    require_selected_backend
     require_traffic_egress
     create_installer_vault
 }
 
 run_ansible_pull() {
+    local backend_extra_vars
     prepare_installer_vault
+    validate_vpn_backend
+    printf -v backend_extra_vars '{"wg_amnezia_enabled":%s}' "${WG_AMNEZIA_ENABLED}"
 
     if [[ "${RESOLVED_RELEASE_REF}" != "${RELEASE_REF}" ]]; then
         info "Running ansible-pull from ${REPO_URL} at ${RELEASE_REF} (resolved to ${RESOLVED_RELEASE_REF})..."
@@ -1337,6 +1407,7 @@ run_ansible_pull() {
         -i inventory/localhost.yml \
         --vault-password-file "${VAULT_PASS_FILE}" \
         --extra-vars "@${VAULT_FILE}" \
+        --extra-vars "${backend_extra_vars}" \
         site.yml || error "ansible-pull failed; the encrypted installer state was retained for a safe rerun."
     restore_repository_git_config
 }
@@ -1351,7 +1422,8 @@ print_summary() {
             ssh_host="${server_addr}"
         fi
     fi
-    local ui_port
+    local ui_port vpn_client=WireGuard
+    [[ ${VPN_BACKEND} != awg ]] || vpn_client=AmneziaWG
     ui_port="$(read_yaml_scalar_default "${REPO_DIR}/roles/vps_hardening/defaults/main.yml" wg_easy_bootstrap_ui_port)"
     stage "Installation complete - Connect your first client"
     cat <<EOF
@@ -1364,7 +1436,7 @@ print_summary() {
      ssh -p ${SSH_PORT} -L ${ui_port}:127.0.0.1:${ui_port} ${ADMIN_USER}@${ssh_host}
 
      Open http://127.0.0.1:${ui_port} and sign in with your WireGuard panel password.
-     Create a client, import its profile into WireGuard, then connect.
+     Create a client, import its profile into ${vpn_client}, then connect.
      VPN endpoint: ${WG_HOST}:${WG_PORT} (UDP); mode: ${WG_TRAFFIC_MODE}.
 
   3. Trust the Caddy root CA on your computer or phone:

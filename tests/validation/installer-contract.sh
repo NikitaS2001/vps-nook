@@ -130,6 +130,66 @@ run_existing_state_main() (
     printf '[PASS] existing-state rerun bypasses prompts and fresh input collection\n'
 )
 
+run_backend_inputs() (
+    local backend expected rc fixture_dir
+    fixture_dir="$(command mktemp -d)"
+    # shellcheck source=../../install.sh
+    source "${ROOT_DIR}/install.sh"
+    trap 'rm -rf -- "${fixture_dir}"' EXIT
+    VAULT_DIR="${fixture_dir}/state"
+    VAULT_MARKER="${VAULT_DIR}/.installer-vault.incomplete"
+    VAULT_PASS_FILE="${VAULT_DIR}/installer-vault.pass"
+    VAULT_FILE="${VAULT_DIR}/installer-vault.yml"
+    export NOOK_NONINTERACTIVE=1
+    export NOOK_ADMIN_PASSWORD='fixture-admin-value'
+    export NOOK_ADGUARD_PASSWORD='fixture-adguard-value'
+    export NOOK_WG_PASSWORD='fixture-wireguard-value'
+    export NOOK_SSH_PUBKEY='ssh-ed25519 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA fixture'
+    export NOOK_WG_HOST=192.0.2.10
+    validate_release_source() { :; }
+    require_root() { :; }
+    require_supported_os() { :; }
+    require_supported_platform() { :; }
+    require_minimum_memory() { :; }
+    require_tun() { :; }
+    report_existing_swap() { :; }
+    install_prerequisites() { touch "${fixture_dir}/prerequisites"; }
+    checkout_release() { :; }
+    install_ansible_toolchain() { :; }
+    install_collections() { :; }
+    run_ansible_pull() {
+        [[ "${VPN_BACKEND}:${WG_AMNEZIA_ENABLED}" == "${backend:-wg}:${expected}" ]] \
+            || fail 'automated backend did not reach deployment with its canonical boolean'
+        touch "${fixture_dir}/applied"
+    }
+    print_summary() { :; }
+    for backend in '' wg awg; do
+        expected=false
+        [[ "${backend}" != awg ]] || expected=true
+        (NOOK_VPN_BACKEND="${backend}" main) >"${fixture_dir}/output" 2>&1
+        [[ -e "${fixture_dir}/applied" ]] || fail 'valid automated backend never reached deployment'
+        rm -f -- "${fixture_dir}/applied" "${fixture_dir}/prerequisites"
+        printf '[PASS] backend-input: %s exit=0 deployment-reached\n' "${backend:-empty-default}"
+    done
+    (unset NOOK_VPN_BACKEND; backend=wg; expected=false; main) >"${fixture_dir}/output" 2>&1
+    [[ -e "${fixture_dir}/applied" ]] || fail 'omitted backend never reached deployment'
+    rm -f -- "${fixture_dir}/applied" "${fixture_dir}/prerequisites"
+    printf '[PASS] backend-input: omitted-default exit=0 deployment-reached\n'
+    for backend in bogus WG AWG true false ' wg' 'awg '; do
+        set +e
+        (set -e; NOOK_VPN_BACKEND="${backend}" main) >"${fixture_dir}/output" 2>&1
+        rc=$?
+        set -e
+        [[ "${rc}" -eq 1 ]] || fail "invalid backend: expected exit 1, got ${rc}"
+        [[ ! -e "${fixture_dir}/prerequisites" && ! -e "${fixture_dir}/applied" && ! -e "${VAULT_DIR}" ]] \
+            || fail 'invalid backend reached prerequisites, state commitment or deployment'
+        printf '[PASS] backend-input-rejection: %s exit=%s no-mutation\n' "${backend}" "${rc}"
+    done
+    rm -rf -- "${fixture_dir}"
+    [[ ! -e "${fixture_dir}" ]] || fail 'backend input fixture cleanup failed'
+    printf '[PASS] backend-input cleanup: owned fixture removed\n'
+)
+
 run_suffix_summary() (
     local suffix="$1"
     local expected_suffix="$2"
@@ -783,6 +843,7 @@ run_source_policy_rejections() (
         --case)
             case "${2:-}" in
             toolchain) run_toolchain_contract ;;
+            backend-inputs) run_backend_inputs ;;
             child-leak-sentinel) run_child_leak_sentinel ;;
             piped-entry-guard) run_piped_entry_guard ;;
             env-clean) bash "${ROOT_DIR}/tests/validation/secret-installer-contract.sh" ;;
@@ -803,6 +864,7 @@ run_source_policy_rejections() (
         ;;
     '')
         run_toolchain_contract
+        run_backend_inputs
         bash "${ROOT_DIR}/tests/validation/secret-installer-contract.sh"
         run_suffix_internal
         run_suffix_home_arpa
