@@ -34,6 +34,9 @@ VAULTWARDEN_INTERNAL_DOMAIN="vw.${INTERNAL_DOMAIN_SUFFIX}"
 # shellcheck disable=SC1091
 # shellcheck source=tests/e2e/common.sh
 source "${E2E_DIR}/common.sh"
+NOOK_VPN_BACKEND="${NOOK_VPN_BACKEND:-wg}"
+vpn_executable >/dev/null
+export NOOK_VPN_BACKEND
 
 INSTALLER_RELEASE_REF="$(sed -n 's/^readonly OFFICIAL_RELEASE_REF="\([^"]*\)"$/\1/p' "${ROOT_DIR}/install.sh")"
 [[ "${INSTALLER_RELEASE_REF}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
@@ -173,6 +176,10 @@ fi
 STATE_SENTINEL="${TMP_DIR}/.qemu-install-state"
 printf 'qemu-install-v1\n' >"${STATE_SENTINEL}"
 QEMU_PID=""
+CLIENT_PREPARED=false
+CLIENT_EXTENSION_READY=false
+SERIAL_OBSERVER_PID=""
+BOOT_FIXTURE_ARMED=false
 cleanup() {
     local exit_status=$?
     if [[ "${E2E_KEEP_STATE_ON_FAILURE:-0}" == 1 && ${exit_status} -ne 0 ]]; then
@@ -181,6 +188,18 @@ cleanup() {
         echo "[E2E] Failure state preserved at ${TMP_DIR} (qemu pid ${QEMU_PID})" >&2
         return
     fi
+    if [[ "${CLIENT_PREPARED}" == true ]]; then
+        run_guest_client cleanup || exit_status=1
+    fi
+    if [[ -n "${SERIAL_OBSERVER_PID}" ]]; then
+        kill "${SERIAL_OBSERVER_PID}" 2>/dev/null || true
+        wait "${SERIAL_OBSERVER_PID}" 2>/dev/null || true
+    fi
+    if [[ "${BOOT_FIXTURE_ARMED}" == true ]]; then
+        run_remote "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
+            "sudo systemctl disable nook-e2e-ready.service && sudo rm -f /etc/systemd/system/nook-e2e-ready.service && sudo rm -rf '${BOOT_GUEST_STATE}' && sudo systemctl daemon-reload" \
+            || exit_status=1
+    fi
     if [[ -n "${QEMU_PID}" ]] && kill -0 "${QEMU_PID}" >/dev/null 2>&1; then
         kill "${QEMU_PID}" >/dev/null 2>&1 || true
         sleep 2
@@ -188,6 +207,7 @@ cleanup() {
     [[ -f "${STATE_SENTINEL}" && "$(<"${STATE_SENTINEL}")" == qemu-install-v1 ]] || \
         fail "refusing to remove an unrecognized QEMU state directory"
     rm -rf -- "${TMP_DIR}"
+    return "${exit_status}"
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
@@ -203,11 +223,117 @@ ADMIN_PASS="$(openssl rand -hex 12)"
 ADGUARD_PASS="$(openssl rand -hex 12)"
 WG_PASS="${NOOK_WG_PASSWORD:-Twelve\$COMPOSE_PROBE}"
 WG_TRAFFIC_MODE="${NOOK_WG_TRAFFIC_MODE:-services}"
+CLIENT_GUEST_STATE="/var/lib/nook-client-${TMP_DIR##*/}"
+
+run_guest_client() {
+    local action="$1" command
+    printf -v command \
+        'sudo env WG_PASSWORD=%q WG_PORT=%q WG_TRAFFIC_MODE=%q NOOK_VPN_BACKEND=%q WG_INTERNAL_DOMAIN=%q ADGUARD_INTERNAL_DOMAIN=%q CLIENT_ACTION=%q CLIENT_STATE=%q VAULTWARDEN_INTERNAL_DOMAIN=%q bash -s' \
+        "${WG_PASS}" "${E2E_WG_PORT}" "${WG_TRAFFIC_MODE}" "${NOOK_VPN_BACKEND}" \
+        "${WG_INTERNAL_DOMAIN}" "${ADGUARD_INTERNAL_DOMAIN}" "${action}" "${CLIENT_GUEST_STATE}" \
+        "$([[ "${CLIENT_EXTENSION_READY}" == true ]] && printf '%s' "${VAULTWARDEN_INTERNAL_DOMAIN}")"
+    run_remote_stdin "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
+        "${command}" < "${SOURCE_DIR}/tests/e2e/client-in-guest.sh"
+}
+
+reboot_and_await_guest() {
+    local nonce previous_boot event_fd event boot reboot_status=0
+    nonce="$(openssl rand -hex 16)"
+    BOOT_GUEST_STATE="/var/lib/nook-reboot-${TMP_DIR##*/}"
+    previous_boot="$(run_remote "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" \
+        "${TMP_DIR}/id_ed25519" 'cat /proc/sys/kernel/random/boot_id')"
+    BOOT_FIXTURE_ARMED=true
+    {
+        printf 'set -euo pipefail\numask 077\nmkdir -m 0700 %q\n' "${BOOT_GUEST_STATE}"
+        printf 'cat >%q <<'"'"'READY_SCRIPT'"'"'\n' "${BOOT_GUEST_STATE}/ready.sh"
+        printf 'set -euo pipefail\n'
+        declare -f await_container_health
+        printf 'await_container_health true\n'
+        cat <<BOOT_SCRIPT
+printf '\\nNOOK_READY ${nonce} %s\\n' "\$(cat /proc/sys/kernel/random/boot_id)" >/dev/ttyS0
+BOOT_SCRIPT
+        printf 'READY_SCRIPT\n'
+        cat <<UNIT
+cat >/etc/systemd/system/nook-e2e-ready.service <<'READY_UNIT'
+[Unit]
+After=docker.service ssh.service
+Requires=docker.service ssh.service
+[Service]
+Type=oneshot
+ExecStart=/bin/bash ${BOOT_GUEST_STATE}/ready.sh
+TimeoutStartSec=210
+[Install]
+WantedBy=multi-user.target
+READY_UNIT
+systemctl daemon-reload
+systemctl enable nook-e2e-ready.service
+UNIT
+    } | run_remote_stdin "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" \
+        "${TMP_DIR}/id_ed25519" 'sudo bash -se'
+    # inotify is armed and acknowledged before reboot. The guest's nonce is
+    # emitted only after new-boot service health, never by a host timer.
+    coproc BOOT_EVENTS {
+        python3 - "${TMP_DIR}/serial.log" "${nonce}" <<'PYBOOT'
+import ctypes
+import os
+import selectors
+import sys
+import time
+
+libc = ctypes.CDLL(None, use_errno=True)
+descriptor = libc.inotify_init1(os.O_CLOEXEC | os.O_NONBLOCK)
+if descriptor < 0:
+    raise OSError(ctypes.get_errno(), "inotify_init1")
+with os.fdopen(descriptor, "rb", buffering=0) as events, open(sys.argv[1], encoding="utf-8", errors="replace") as serial:
+    if libc.inotify_add_watch(events.fileno(), os.fsencode(sys.argv[1]), 2 | 1024 | 2048) < 0:
+        raise OSError(ctypes.get_errno(), "inotify_add_watch")
+    serial.seek(0, os.SEEK_END)
+    with selectors.DefaultSelector() as selector:
+        selector.register(events, selectors.EVENT_READ)
+        print("ARMED", flush=True)
+        deadline = time.monotonic() + 240
+        pending = ""
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not selector.select(remaining):
+                raise SystemExit("guest readiness event timeout")
+            os.read(events.fileno(), 65536)
+            pending += serial.read()
+            lines = pending.split("\n")
+            pending = lines.pop()
+            for line in lines:
+                if line.startswith("NOOK_READY " + sys.argv[2] + " "):
+                    print(line.strip(), flush=True)
+                    raise SystemExit(0)
+PYBOOT
+    }
+    SERIAL_OBSERVER_PID="${BOOT_EVENTS_PID}"
+    event_fd="${BOOT_EVENTS[0]}"
+    IFS= read -r -t 10 -u "${event_fd}" event
+    [[ "${event}" == ARMED ]] || fail "reboot observer did not arm"
+    run_remote "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
+        'sudo systemctl reboot' || reboot_status=$?
+    # SSH may close during an accepted reboot. Only the nonce/new-boot event
+    # and subsequent authenticated connection can establish success.
+    [[ "${reboot_status}" == 0 || "${reboot_status}" == 255 ]] || fail "reboot command failed"
+    IFS= read -r -t 250 -u "${event_fd}" event
+    [[ "${event}" == "NOOK_READY ${nonce} "* ]] || fail "unexpected reboot readiness event"
+    boot="${event##* }"
+    [[ "${boot}" =~ ^[0-9a-f-]{36}$ && "${boot}" != "${previous_boot}" ]] || fail "stale boot event"
+    wait "${SERIAL_OBSERVER_PID}"
+    SERIAL_OBSERVER_PID=""
+    [[ "$(run_remote "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
+        'cat /proc/sys/kernel/random/boot_id')" == "${boot}" ]] || fail "SSH boot identity differs from event"
+}
 
 copy_repo_to_guest() {
     local target="$1" port="$2" key="$3"
     run_remote "${target}" "${port}" "${key}" \
-        "command -v git >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq git)"
+        "if ! command -v git >/dev/null || ! command -v strace >/dev/null; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq git strace || exit \$?
+        fi
+        command -v git >/dev/null && command -v strace >/dev/null &&
+            python3 -c 'import os; descriptor = os.pidfd_open(os.getpid()); os.close(descriptor)'" || return
     tar -C "${SOURCE_DIR}" -czf - . | \
         run_remote_stdin "${target}" "${port}" "${key}" \
         "sudo mkdir -p /tmp/ztrepo && sudo find /tmp/ztrepo -mindepth 1 -delete && sudo tar xzf - -C /tmp/ztrepo && sudo chown -R \$(id -u):\$(id -g) /tmp/ztrepo && cd /tmp/ztrepo && git init -q -b '${INSTALL_REF}' && git add -A && git -c user.name=e2e -c user.email=e2e.invalid commit -qm e2e-source"
@@ -220,6 +346,7 @@ run_repository_installer() {
     local source_env=""
     local installer_log="${TMP_DIR}/installer.log"
     local installer_status=0
+    vpn_executable >/dev/null || return
     credential_env="$(build_installer_credential_env \
         "${state_mode}" "${ADMIN_PASS}" "${ADGUARD_PASS}" "${WG_PASS}" "${PUBKEY}")"
     if [[ "${E2E_SOURCE_MODE}" == "development" ]]; then
@@ -235,6 +362,7 @@ run_repository_installer() {
         NOOK_ADMIN_USER=sysadmin \
         ${credential_env} \
         NOOK_WG_TRAFFIC_MODE='${WG_TRAFFIC_MODE}' \
+        NOOK_VPN_BACKEND='${NOOK_VPN_BACKEND}' \
         NOOK_INTERNAL_DOMAIN_SUFFIX='${INTERNAL_DOMAIN_SUFFIX}' \
         NOOK_INTERNAL_DOMAINS='${WG_INTERNAL_DOMAIN} ${ADGUARD_INTERNAL_DOMAIN}' \
         NOOK_WG_HOST=127.0.0.1 \
@@ -512,6 +640,16 @@ verify_bootstrap_secret_free \
     "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519"
 echo "[E2E] wg-easy login and secret scrub verified"
 
+if [[ "${DO_CLIENT_TEST}" == true ]]; then
+    if [[ "${NOOK_VPN_BACKEND}" == wg ]]; then
+        run_remote "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
+            'sudo apt-get update -qq >/dev/null && sudo apt-get install -y -qq wireguard-tools jq openssl dnsutils resolvconf >/dev/null'
+    fi
+    # AWG matching tools/module remain externally prepared; never install a fallback.
+    CLIENT_PREPARED=true
+    run_guest_client prepare
+fi
+
 if [[ "${DO_VAULTWARDEN}" == "true" ]]; then
     vaultwarden_target="sysadmin@127.0.0.1"
     echo "[E2E] Installing Vaultwarden through the operator recipe..."
@@ -557,8 +695,11 @@ if [[ "${DO_VAULTWARDEN}" == "true" ]]; then
         "${vaultwarden_target}" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519"
 
     echo "[E2E] Activating the Vaultwarden Caddy fragment through the installer..."
+    [[ "${DO_CLIENT_TEST}" != true ]] || run_guest_client check
     run_repository_installer \
         "${vaultwarden_target}" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" existing
+    CLIENT_EXTENSION_READY=true
+    [[ "${DO_CLIENT_TEST}" != true ]] || run_guest_client check
     verify_deployment \
         "${vaultwarden_target}" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519"
     run_vaultwarden_manager \
@@ -580,9 +721,11 @@ if [[ "${DO_STOPPED_CONTAINER}" == "true" ]]; then
     fi
     grep -q 'container adguard is not running and healthy' "${stopped_log}" || \
         fail "stopped-container failure did not identify adguard"
-    run_remote "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
-        'sudo docker start adguard >/dev/null'
-    sleep 20
+    {
+        declare -f await_container_health
+        printf 'await_container_health docker start adguard\n'
+    } | run_remote_stdin "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
+        'sudo bash -se'
     verify_deployment "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" \
         "${TMP_DIR}/id_ed25519"
     echo "[E2E] Stopped container was identified and recovered"
@@ -590,13 +733,8 @@ fi
 
 if [[ "${DO_REBOOT}" == "true" ]]; then
     echo "[E2E] Rebooting the VM and re-verifying..."
-    boot_id_before="$(run_remote "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" \
-        "${TMP_DIR}/id_ed25519" 'cat /proc/sys/kernel/random/boot_id')"
-    run_remote "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
-        'sudo systemctl reboot' || true
-    require_rebooted "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" \
-        "${TMP_DIR}/id_ed25519" "${boot_id_before}" 60
-    sleep 20
+    [[ "${DO_CLIENT_TEST}" != true ]] || run_guest_client check
+    reboot_and_await_guest
     verify_deployment "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519"
     verify_traffic_mode "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" \
         "${TMP_DIR}/id_ed25519" "${WG_TRAFFIC_MODE}"
@@ -607,20 +745,7 @@ if [[ "${DO_REBOOT}" == "true" ]]; then
             "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" verify
     fi
     echo "[E2E] Reboot survival verified"
-fi
-
-if [[ "${DO_CLIENT_TEST}" == "true" ]]; then
-    echo "[E2E] Installing wireguard-tools and jq in the guest..."
-    run_remote "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
-        'sudo apt-get update -qq >/dev/null && sudo apt-get install -y -qq wireguard-tools jq openssl dnsutils resolvconf >/dev/null'
-    echo "[E2E] Running the in-guest WireGuard client handshake test..."
-    vaultwarden_client_env=""
-    if [[ "${DO_VAULTWARDEN}" == "true" ]]; then
-        vaultwarden_client_env="VAULTWARDEN_INTERNAL_DOMAIN='${VAULTWARDEN_INTERNAL_DOMAIN}' "
-    fi
-    run_remote_stdin "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
-        "sudo WG_PASSWORD='${WG_PASS}' WG_PORT='${E2E_WG_PORT}' WG_TRAFFIC_MODE='${WG_TRAFFIC_MODE}' WG_INTERNAL_DOMAIN='${WG_INTERNAL_DOMAIN}' ADGUARD_INTERNAL_DOMAIN='${ADGUARD_INTERNAL_DOMAIN}' ${vaultwarden_client_env}bash -s" \
-        < "${SOURCE_DIR}/tests/e2e/client-in-guest.sh"
+    [[ "${DO_CLIENT_TEST}" != true ]] || run_guest_client check
 fi
 
 if [[ "${DO_IDEMPOTENCY}" == "true" ]]; then
@@ -642,12 +767,14 @@ if [[ "${DO_IDEMPOTENCY}" == "true" ]]; then
     copy_repo_to_guest \
         "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519"
     echo "[E2E] Re-running the installer to verify idempotency..."
+    [[ "${DO_CLIENT_TEST}" != true ]] || run_guest_client check
     idempotency_log="${TMP_DIR}/idempotency.log"
     run_repository_installer \
         "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" existing | \
         tee "${idempotency_log}"
     echo "[E2E] Verifying the stack after the second installer run..."
     verify_deployment "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519"
+    [[ "${DO_CLIENT_TEST}" != true ]] || run_guest_client check
     wg_container_id_after="$(run_remote "sysadmin@127.0.0.1" \
         "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
         'sudo docker inspect wg-easy --format "{{.Id}}"')"
@@ -763,6 +890,7 @@ if [[ "${DO_IDEMPOTENCY}" == "true" ]]; then
     echo "[E2E] Invalid candidate preserved live state; valid recovery reloaded without recreation"
 
     echo "[E2E] Exercising retry from a nonzero setup_step..."
+    [[ "${DO_CLIENT_TEST}" != true ]] || run_guest_client check
     run_remote "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
         "sudo docker stop wg-easy >/dev/null && sudo python3 -c \"import sqlite3; db=sqlite3.connect('/opt/vps-nook/volumes/wg-easy/wg-easy.db'); db.execute('DELETE FROM users_table'); db.execute('UPDATE general_table SET setup_step=2'); db.commit(); db.close()\""
     run_repository_installer \
@@ -773,6 +901,7 @@ if [[ "${DO_IDEMPOTENCY}" == "true" ]]; then
     verify_bootstrap_secret_free \
         "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519"
     echo "[E2E] Nonzero setup state retried to durable completion"
+    [[ "${DO_CLIENT_TEST}" != true ]] || run_guest_client check
 fi
 
 if [[ "${QEMU_HOLD_FOR_EXTERNAL_CLIENT:-0}" == 1 ]]; then

@@ -16,6 +16,49 @@ pass() {
     echo "[PASS] $*"
 }
 
+vpn_executable() {
+    case "${NOOK_VPN_BACKEND:-wg}" in
+        wg) printf 'wg\n' ;;
+        awg) printf 'awg\n' ;;
+        *) fail "NOOK_VPN_BACKEND must be wg or awg" ;;
+    esac
+}
+
+# Docker flushes headers before registration, but encodes replayed events only
+# after SubscribeToEvents. A replayed container event is the subscription barrier;
+# it is not readiness evidence. This fixture has already started/stopped containers.
+await_container_health() (
+    local event_pid event_fd line
+    coproc HEALTH_EVENTS {
+        curl -fsSN --max-time 180 --include --unix-socket /var/run/docker.sock \
+            'http://localhost/events?since=0&filters=%7B%22type%22:%5B%22container%22%5D%7D'
+    }
+    event_pid="${HEALTH_EVENTS_PID}"
+    event_fd="${HEALTH_EVENTS[0]}"
+    trap 'kill "${event_pid}" 2>/dev/null || :; wait "${event_pid}" 2>/dev/null || :' EXIT
+    IFS= read -r -t 10 -u "${event_fd}" line
+    [[ "${line}" == HTTP/*' 200 '* ]] || exit 1
+    while IFS= read -r -t 10 -u "${event_fd}" line; do
+        [[ "${line}" != $'\r' ]] || break
+    done
+    [[ "${line}" == $'\r' ]] || exit 1
+    IFS= read -r -t 10 -u "${event_fd}" line || exit 1
+    jq -e '.Type == "container"' <<<"${line}" >/dev/null || exit 1
+    "$@" >/dev/null || exit
+    while true; do
+        if docker inspect wg-easy adguard caddy | jq -e '
+            length == 3 and all(.[];
+                .State.Running == true and
+                ((.Name == "/wg-easy" and (.State.Health == null or .State.Health.Status == "healthy"))
+                 or (.Name != "/wg-easy" and .State.Health.Status == "healthy")))
+        ' >/dev/null; then
+            exit 0
+        fi
+        IFS= read -r -t 180 -u "${event_fd}" line || exit 1
+        jq -e '.Type == "container" or .Action == "health_status: healthy"' <<<"${line}" >/dev/null || exit 1
+    done
+)
+
 validate_recent_matching_handshake_epochs() {
     local now="$1" client_epoch="$2" server_epoch="$3"
 
@@ -255,7 +298,8 @@ verify_deployment() {
     local target="$1"; local port="$2"; local key="$3"
     local ssh_port="${E2E_SSH_PORT:-2222}"
     local wg_port="${E2E_WG_PORT:-51820}"
-    local out
+    local out executable
+    executable="$(vpn_executable)" || return
 
     echo "[check] SSH on hardened port ${port} works with the admin key"
     run_remote "${target}" "${port}" "${key}" 'echo ssh-ok' >/dev/null
@@ -283,7 +327,9 @@ verify_deployment() {
     pass "container state and health"
 
     echo "[check] WireGuard interface is up inside wg-easy"
-    run_remote "${target}" "${port}" "${key}" 'sudo docker exec wg-easy wg show' >/dev/null
+    run_remote "${target}" "${port}" "${key}" \
+        "sudo docker exec wg-easy ${executable} show wg0" >/dev/null || \
+        fail "selected backend has no ready wg0"
     pass "WireGuard interface"
 
     echo "[check] wg-easy admin API enforces authentication (expect 401)"

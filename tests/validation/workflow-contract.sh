@@ -23,6 +23,7 @@ validate_workflows() {
     WORKFLOW_ROOT="${ROOT_DIR}" python3 - <<'PY'
 import os
 import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -99,6 +100,11 @@ for name, jobs in (("ci", ci_jobs), ("weekly", weekly_jobs)):
         steps = job.get("steps", [])
         if sum(step.get("run") == "scripts/bootstrap.sh" for step in steps) != 1:
             sys.exit("workflow-contract: each test job must bootstrap pinned tools")
+        bootstrap_index = next(index for index, step in enumerate(steps) if step.get("run") == "scripts/bootstrap.sh")
+        prerequisite_commands = [shlex.split(step.get("run", "")) for step in steps[:bootstrap_index]]
+        if not any("apt-get" in command and "install" in command and "strace" in command
+                   for command in prerequisite_commands):
+            sys.exit("workflow-contract: prepare strace before bootstrapping each test job")
         uploads = [step for step in steps if "actions/upload-artifact@" in step.get("uses", "")]
         if len(uploads) != 1 or uploads[0].get("if") != "always()":
             sys.exit("workflow-contract: every test job needs an unconditional JUnit upload")

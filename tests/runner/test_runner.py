@@ -5,6 +5,7 @@ import signal
 import subprocess
 import sys
 import time
+from unittest.mock import Mock
 
 import pytest
 
@@ -529,12 +530,16 @@ def test_incomplete_cleanup_is_a_failure(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("status", [0, 23], ids=["success", "installer-failure"])
 def test_qemu_installer_preserves_status_in_conditional(source_root, tmp_path, status):
+    common = (source_root / "tests/e2e/common.sh").read_text()
+    vpn_start = common.index("vpn_executable() {\n")
+    vpn_function = common[vpn_start:common.index("\n}\n", vpn_start) + 3]
     source = (source_root / "tests/e2e/qemu-install.sh").read_text()
     start = source.index("run_repository_installer() {")
     function = source[start:source.index("\n}\n", start) + 3]
     fixture = tmp_path / "status.sh"
     fixture.write_text('''set -euo pipefail
 TMP_DIR="$1"
+NOOK_VPN_BACKEND=wg
 E2E_SOURCE_MODE=development
 INSTALL_REF=fixture
 ADMIN_PASS=fixture ADGUARD_PASS=fixture WG_PASS=fixture PUBKEY=fixture
@@ -543,7 +548,7 @@ INTERNAL_DOMAIN_SUFFIX=internal WG_INTERNAL_DOMAIN=wg.internal ADGUARD_INTERNAL_
 build_installer_credential_env() { :; }
 run_remote() { echo 'NON-PRODUCTION DEVELOPMENT MODE'; return STATUS; }
 fail() { exit 97; }
-'''.replace("STATUS", str(status)) + function + '''
+'''.replace("STATUS", str(status)) + vpn_function + function + '''
 if run_repository_installer fixture 22 fixture; then
     exit 0
 else
@@ -576,6 +581,106 @@ def test_vm_gate_flags_are_preserved():
     assert gates["remote-ssh"] == {"--ssh-rollback-test", "--ssh-cutover-test", "--reboot-test",
                                    "--ufw-backend-failure-test"}
     assert gates["lifecycle-upgrade-restore"] == set()
+
+
+@pytest.fixture
+def vpn_dispatch(monkeypatch, tmp_path):
+    import tests.e2e.test_vm as vm
+
+    monkeypatch.setattr(vm.shutil, "which", Mock(return_value="/fixture/tool"))
+    monkeypatch.setattr(vm.os, "access", Mock(return_value=True))
+    return vm, Mock(), tmp_path
+
+
+@pytest.mark.parametrize("selection", [
+    (backend, traffic, expected)
+    for backend in ("wg", "awg")
+    for traffic, expected in ((None, "services"), ("", "services"), ("services", "services"), ("full", "full"))
+])
+def test_vpn_dispatch_preserves_services_selection(vpn_dispatch, monkeypatch, selection):
+    # Given a selected backend and an independent routing choice.
+    vm, command, root = vpn_dispatch
+    backend, traffic, expected = selection
+    monkeypatch.setenv("NOOK_VPN_BACKEND", backend)
+    if traffic is None:
+        monkeypatch.delenv("NOOK_WG_TRAFFIC_MODE", raising=False)
+    else:
+        monkeypatch.setenv("NOOK_WG_TRAFFIC_MODE", traffic)
+    case = next(case for case in VMS if case.id == "qemu-services")
+
+    # When the actual pytest VM owner dispatches the registered case.
+    vm.test_vm(case, root, command)
+
+    # Then the real harness receives the requested backend and routing.
+    command.assert_called_once_with(case.argv, cwd=root, timeout=case.timeout,
+                                    env={"NOOK_WG_TRAFFIC_MODE": expected, "NOOK_VPN_BACKEND": backend})
+
+
+@pytest.mark.parametrize("backend", [None, ""])
+def test_vpn_dispatch_defaults_backend(vpn_dispatch, monkeypatch, backend):
+    vm, command, root = vpn_dispatch
+    monkeypatch.delenv("NOOK_WG_TRAFFIC_MODE", raising=False)
+    if backend is None:
+        monkeypatch.delenv("NOOK_VPN_BACKEND", raising=False)
+    else:
+        monkeypatch.setenv("NOOK_VPN_BACKEND", backend)
+    case = next(case for case in VMS if case.id == "qemu-services")
+
+    vm.test_vm(case, root, command)
+
+    assert command.call_args.kwargs["env"] == {"NOOK_WG_TRAFFIC_MODE": "services", "NOOK_VPN_BACKEND": "wg"}
+
+
+@pytest.mark.parametrize("traffic", ["bogus", "full; exit 0"])
+def test_vpn_dispatch_rejects_invalid_before_preparation(vpn_dispatch, monkeypatch, traffic):
+    vm, command, root = vpn_dispatch
+    monkeypatch.setenv("NOOK_WG_TRAFFIC_MODE", traffic)
+    vm.shutil.which.reset_mock()
+    vm.os.access.reset_mock()
+    case = next(case for case in VMS if case.id == "qemu-services")
+
+    with pytest.raises(CommandFailure):
+        vm.test_vm(case, root, command)
+
+    command.assert_not_called()
+    vm.shutil.which.assert_not_called()
+    vm.os.access.assert_not_called()
+
+
+@pytest.mark.parametrize("case", [case for case in VMS if case.id != "qemu-services"], ids=lambda case: case.id)
+def test_vpn_dispatch_other_vm_defaults_unchanged(vpn_dispatch, monkeypatch, case):
+    vm, command, root = vpn_dispatch
+    monkeypatch.setenv("NOOK_WG_TRAFFIC_MODE", "full")
+    monkeypatch.setenv("NOOK_VPN_BACKEND", "awg")
+
+    vm.test_vm(case, root, command)
+
+    command.assert_called_once_with(case.argv, cwd=root, timeout=case.timeout, env={"NOOK_WG_TRAFFIC_MODE": "services"})
+
+
+def test_vpn_dispatch_propagates_harness_failure(vpn_dispatch, monkeypatch):
+    vm, command, root = vpn_dispatch
+    monkeypatch.setenv("NOOK_WG_TRAFFIC_MODE", "full")
+    failure = CommandFailure("fixture harness exit 23")
+    command.side_effect = failure
+    case = next(case for case in VMS if case.id == "qemu-services")
+
+    with pytest.raises(CommandFailure) as caught:
+        vm.test_vm(case, root, command)
+
+    assert caught.value is failure
+
+
+def test_vpn_dispatch_missing_prerequisite_fails(vpn_dispatch, monkeypatch):
+    vm, command, root = vpn_dispatch
+    monkeypatch.setenv("NOOK_WG_TRAFFIC_MODE", "services")
+    vm.shutil.which.return_value = None
+    case = next(case for case in VMS if case.id == "qemu-services")
+
+    with pytest.raises(CommandFailure):
+        vm.test_vm(case, root, command)
+
+    command.assert_not_called()
 
 
 def test_short_runtime_state_supports_ssh_control_socket():

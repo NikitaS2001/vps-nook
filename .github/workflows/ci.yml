@@ -21,6 +21,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Install native test prerequisites
+        run: sudo apt-get update && sudo apt-get install -y strace
+
       - name: Bootstrap development tools
         run: scripts/bootstrap.sh
 
@@ -56,6 +59,9 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install native test prerequisites
+        run: sudo apt-get update && sudo apt-get install -y strace
 
       - name: Bootstrap development tools
         run: scripts/bootstrap.sh
