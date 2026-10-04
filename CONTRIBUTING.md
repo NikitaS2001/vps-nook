@@ -8,6 +8,12 @@ without a response SLA. Contributions use the [MIT License](LICENSE).
 
 ## Setup and checks
 
+Install `strace` through your system package manager before bootstrapping.
+Native installer PTY checks also require Bash, OpenSSH, awk and coreutils,
+Python 3.9 or later, and Linux 5.3 or later with working `pidfd_open` support.
+Bootstrap checks strace and the actual pidfd syscall before changing `.venv`;
+it does not install system packages or invoke sudo.
+
 ```bash
 ./scripts/bootstrap.sh
 ./scripts/check.sh

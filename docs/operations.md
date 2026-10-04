@@ -117,17 +117,28 @@ failure.
 
 ## AmneziaWG kernel module
 
-`wg_amnezia_enabled` requires the `amneziawg` kernel module; the role loads and
-persists it but never builds one. Build it on the host with the headers for the
-running kernel, then enable the input and rerun Ansible:
+For a fresh installation, `NOOK_VPN_BACKEND=awg` (controller input:
+`wg_amnezia_enabled: true`) requires an operator-prepared module matching the
+running kernel and the AmneziaWG tools in the pinned wg-easy image. Obtain and
+prepare it through your operator-managed process before deployment. VPS Nook
+does not build, install, or download an AWG module and has no userspace fallback.
+The verified role default `wg_amnezia_kernel_module` is currently `amneziawg`:
 
 ```bash
 uname -r
-sudo modinfo amneziawg   # must resolve before enabling
+sudo modinfo amneziawg   # metadata must resolve for the running kernel
 ```
 
-Keep the module version aligned with the `amneziawg-tools` build inside the
-pinned wg-easy image, and rebuild after every kernel upgrade. Diagnostics:
+The installer's early metadata check runs before fresh encrypted-state commitment
+or server roles. It does not load the module or prove protocol interoperability.
+The role separately checks availability, then loads and persists the module with
+`modprobe`; loader failure stops deployment. Existing installer vault and
+vault-password bytes remain unchanged when that prerequisite fails.
+
+Recheck module compatibility and availability for every kernel upgrade before
+rebooting into the new kernel. A successful `modinfo` alone is not a successful
+load or a matching-client handshake. After deployment, inspect the loaded module
+and the exact AWG interface:
 
 ```bash
 lsmod | grep amneziawg
@@ -137,6 +148,18 @@ sudo docker exec wg-easy awg show wg0   # jc/jmin/jmax/s1/s2/h1..h4 must appear
 Plain `wg show wg0` returns `Not supported` for an AmneziaWG interface. Use
 `awg` when troubleshooting; the role and `scripts/synthetic-check.sh` select the
 executable automatically.
+
+Connect with a matching AmneziaWG client and a refreshed profile, then check
+DNS and both internal HTTPS sites through the tunnel. Module loading and
+`awg show wg0` do not by themselves establish client interoperability.
+Routing changes require refreshed profiles for either backend.
+
+Installer reruns preserve the backend in the encrypted vault: omission preserves
+it, a matching `NOOK_VPN_BACKEND` is accepted, and a conflict is rejected. Legacy
+vaults without `wg_amnezia_enabled` remain WG without a vault rewrite. Do not
+delete or edit saved state to force a switch. There is no silent migration or
+supported controller transition procedure for existing peers; changing the wire
+protocol requires refreshed profiles and matching applications.
 
 ## Removing the deployment
 

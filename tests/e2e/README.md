@@ -7,6 +7,9 @@ external routing. GitHub Actions stores no VPS credentials.
 Local prerequisites are `qemu-system-x86_64`, `qemu-img`, KVM,
 `genisoimage`, OpenSSH, curl, and the tools installed by
 [`scripts/bootstrap.sh`](../../scripts/bootstrap.sh).
+Prepare `strace` before bootstrap. Shared installer PTY checks require
+Python 3.9+ and Linux 5.3+ with working `pidfd_open`; supported Debian 12 and
+Ubuntu 24.04 images meet those version requirements.
 
 ## Standard entry points
 
@@ -48,6 +51,10 @@ Before provisioning, the harness runs the installer dialogue through a real
 functions are stubbed for this dialogue check; it verifies root execution,
 completion, and hidden password input. Privileged fixture execution and cleanup
 stay inside the disposable guest. Local quick checks never invoke host `sudo`.
+Repository-copy setup installs missing git/strace packages and probes pidfd
+before the shared fixture. Package or syscall failure stops the harness before
+repository transfer or fixture invocation; it does not imply a passing sudo/PTY
+scenario. Real guest sudo/ptrace interoperability is proved only by the QEMU run.
 
 Supported flags:
 
@@ -71,9 +78,47 @@ QEMU_USER=debian \
 tests/e2e/qemu-install.sh --client-test --idempotency-test
 ```
 
-`NOOK_WG_TRAFFIC_MODE=full` requires IPv4 egress. A dual-stack test
-environment additionally exercises IPv6 routing; IPv4-only hosts generate
-IPv4-only full-tunnel profiles.
+`NOOK_VPN_BACKEND=wg` (default) or `awg` selects both the installer and the
+exact `wg show wg0` / `awg show wg0` readiness query. Before the first WG
+client preparation, the harness installs `wireguard-tools`, `jq`, `openssl`,
+`dnsutils`, and `resolvconf` inside the disposable guest; package setup failure
+stops before peer creation. AWG requires an externally prepared matching
+kernel module and client tools in the guest image. Client checks
+require `curl`, `jq`, `ip`, `dig`, `ping`, Python 3, and the matching `wg` /
+`wg-quick` or `awg` / `awg-quick`. The harness neither acquires modules nor
+installs a userspace fallback. Missing prerequisites fail.
+
+The pinned wg-easy 15.4.0 source ships amneziawg-tools v3.0.20260805.
+Prepared AWG tools must support its generated Jc/Jmin/Jmax, S1-S4, H1-H4 and
+optional I1-I5 fields. Runtime compatibility with the pinned image digest
+still requires an actual prepared guest; source inspection cannot establish it.
+
+The client peer is created before the first completed-state rerun or reboot.
+Its ID, original private profile and identity fingerprint remain in a private
+guest directory until final cleanup. Every boundary check compares server
+identity, peer membership and profile parameters, recreates only the client
+kernel interface, and requires a bound, CA-authenticated HTTPS response.
+That fresh interface has no prior session keys; a positive old timestamp alone
+cannot pass. DNS uses the tunnel address and routes, and both internal names
+must resolve to `10.66.0.3`. Removing the interface must break bound DNS/HTTPS
+while direct dual-stack controls remain reachable.
+
+A temporary, unprivileged container reuses the already-deployed image
+without pulling or publishing ports. It provides controlled forbidden IPv4
+and IPv6 destinations outside the services allowlist. Both direct controls
+must work; both tunnel requests must fail in services mode. Allowed IPv6
+traffic to the VPN server must also work. Missing controlled IPv6 proof is a
+failure, never a skip. `full` requires IPv4 egress; public IPv6 remains a
+separately reported optional control. A full profile containing `::/0`
+requires an actual successful public IPv6 probe.
+
+Service recovery subscribes to Docker events before starting a container.
+Reboot installs an owned disposable oneshot and arms an inotify serial
+observer before the trigger; a nonce, a new boot ID, service health and
+authenticated SSH must all agree. Waits are bounded. Cleanup removes the
+observer, guest unit, test container, peer and private credential artifacts.
+The source/packet contracts execute safe adapters and the native observer;
+they do not prove guest packets, cryptographic handshakes or sudo portability.
 
 The Vaultwarden path proves real Compose health, private/no-port runtime through
 `manage.sh verify`, AdGuard DNS, WireGuard routing, the Caddy root CA, and a

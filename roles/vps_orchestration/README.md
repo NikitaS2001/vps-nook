@@ -14,7 +14,7 @@ upstream artifacts are in [`defaults/main.yml`](defaults/main.yml).
 | --- | --- | --- |
 | `project_root` | `/opt/vps-nook` | Managed Compose, Caddy, and service-data root |
 | `wg_traffic_mode` | `services` | Server-enforced `services` or IPv4 `full` policy with optional IPv6 |
-| `wg_amnezia_enabled` | `false` | Run the wg-easy tunnel on AmneziaWG; requires the host kernel module |
+| `wg_amnezia_enabled` | `false` | Select AmneziaWG independently of traffic mode; requires a prepared matching host module and client |
 | `docker_network_subnet` | `10.66.0.0/24` | Private service IPv4 network |
 | `docker_network_ipv6_subnet` | `fd00:67:0:0::/64` | Private service IPv6 network |
 | `wg_vpn_subnet` | `10.8.0.0/24` | WireGuard client IPv4 network |
@@ -40,6 +40,32 @@ mode `0600`; see [Configuration](../../docs/configuration.md).
 See [traffic policy](../../docs/configuration.md#traffic-policy) for mode behavior
 and client requirements. Transitions snapshot wg-easy state, apply policy while
 it is stopped, and restore the snapshot if activation or readiness fails.
+
+## VPN backend
+
+The installer maps `NOOK_VPN_BACKEND=wg|awg` (default `wg`) to the role boolean
+`wg_amnezia_enabled` (default `false`). Either backend supports `services` or
+`full`; selecting AWG does not change the routing default.
+
+AWG requires an operator-prepared module matching the running kernel and pinned
+wg-easy tools, and a matching client. The module name is the verified default
+`wg_amnezia_kernel_module` (currently `amneziawg`). The installer checks metadata
+before fresh encrypted-state commitment or server roles. The role checks
+availability, then loads and persists the module; metadata alone proves neither
+loading nor interoperability. No automatic module build, install, download, or
+userspace fallback is provided.
+
+New installer vaults store canonical `"false"`/`"true"` backend values, passed to
+Ansible as a native boolean. Legacy vaults without the field remain WG. Installer
+reruns preserve saved vault/password bytes: omission preserves the backend,
+matching explicit input is accepted, and conflicting input is rejected.
+Controller variables remain separate from installer state.
+
+Backend changes are not a supported controller transition procedure for existing
+peers. There is no silent migration; changed protocol or routing requires
+refreshed client profiles, and AWG requires the matching application. See
+[Configuration](../../docs/configuration.md#amneziawg) and
+[module operations](../../docs/operations.md#amneziawg-kernel-module).
 
 ## Owned state and extension points
 

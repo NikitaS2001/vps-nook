@@ -46,16 +46,38 @@ Transitions are transactional and require updated client profiles. There is no
 
 ## AmneziaWG
 
-Set `wg_amnezia_enabled: true` to run the tunnel on AmneziaWG instead of plain
-WireGuard. It changes the wire protocol, so every client needs a refreshed
-profile and an AmneziaWG-capable client application.
+The installer accepts `NOOK_VPN_BACKEND=wg|awg`: `wg` (ordinary WireGuard) is
+the default; `awg` selects AmneziaWG. Backend and traffic policy are independent:
+either backend can use `services` (default) or `full`. In controller variables,
+the corresponding role input is `wg_amnezia_enabled: false|true`.
 
-The host kernel module is a prerequisite: the role asserts it with `modinfo`,
-loads and persists it with `modprobe`, and fails closed when it is missing. It
-does not build kernel modules. See
-[operations](operations.md#amneziawg-kernel-module) for installation. wg-easy
+AWG requires an operator-prepared host kernel module matching the running
+kernel and the tools in the pinned wg-easy image, plus a matching AmneziaWG
+client. The module name comes from the verified role default
+`wg_amnezia_kernel_module` (currently `amneziawg`). There is no automatic module
+build, installation, download, or userspace fallback.
+
+Before committing fresh encrypted inputs or running server roles, the installer
+checks module metadata with `modinfo`. The role also checks availability, then
+loads and persists the module with `modprobe`; failure stops deployment.
+Metadata availability does not prove successful loading or client
+interoperability. See [operations](operations.md#amneziawg-kernel-module) for
+module preparation and checks. wg-easy
 receives `EXPERIMENTAL_AWG`/`OVERRIDE_AUTO_AWG` so it selects AmneziaWG without
 inspecting host modules; the container gets no `/lib/modules` mount.
+
+New encrypted installer vaults persist `wg_amnezia_enabled` as the canonical
+lowercase `"false"` or `"true"` string; the installer passes it to Ansible as a
+native boolean. A legacy installer vault without that field means WG, without
+rewriting the vault. On rerun, omitting `NOOK_VPN_BACKEND` preserves the saved
+backend, a matching explicit value is accepted, and a conflicting value is
+rejected. The saved vault and vault-password file remain authoritative, with
+their bytes preserved on reuse and on prerequisite failure.
+
+The installer does not migrate existing tunnels. Changing a controller variable
+is not a supported backend-transition procedure: AWG changes the wire protocol,
+and existing clients need refreshed profiles and a matching client application.
+Do not assume initialized peers are converted automatically.
 
 ## Ports and identity
 
@@ -123,6 +145,7 @@ shell history or repository files.
 | `NOOK_SSH_PUBKEY` | Fresh-install administrator's OpenSSH public key |
 | `NOOK_WG_HOST` | Public WireGuard hostname or IPv4; detected when omitted |
 | `NOOK_WG_TRAFFIC_MODE` | `services` (default) or `full` |
+| `NOOK_VPN_BACKEND` | `wg` (default) or `awg`; independent of traffic mode; AWG requires a prepared module and matching client |
 | `NOOK_SSH_PORT`, `NOOK_WG_PORT` | Optional ports; defaults come from the roles |
 | `NOOK_ADMIN_USER` | Optional administrator username |
 | `NOOK_INTERNAL_DOMAIN_SUFFIX` | Optional internal DNS suffix |
@@ -130,7 +153,8 @@ shell history or repository files.
 
 On rerun omit credential inputs. Supplied ordinary settings must match the saved
 vault. The interactive wizard also reuses saved inputs; it cannot silently rotate
-credentials or change routing.
+credentials, change routing, or switch backend. Omitted backend input preserves
+the saved choice rather than applying the fresh-install WG default.
 
 `NOOK_DEV_MODE=1` allows `NOOK_REPO_URL` and `NOOK_RELEASE_REF` for disposable
 development fixtures only. Production accepts the built-in repository and release.
