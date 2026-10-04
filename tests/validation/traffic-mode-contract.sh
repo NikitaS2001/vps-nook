@@ -4,7 +4,11 @@ umask 077
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/traffic-mode-contract.XXXXXX")"
-cleanup() { find "${TMP}" -depth -delete; }
+cleanup() {
+  find "${TMP}" -depth -delete
+  [[ ! -e "${TMP}" ]]
+  printf '[CLEANUP] traffic_fixture_removed=%s\n' "${TMP}"
+}
 trap cleanup EXIT INT TERM
 
 PROJECT="${TMP}/project"
@@ -51,6 +55,7 @@ case "${1:-}" in
   exec)
     shift 2
     if [[ "$*" == "wg show wg0" || "$*" == "awg show wg0" ]]; then
+      [[ "${1}" == "${TRAFFIC_TEST_EXECUTABLE:?}" ]] || exit 74
       [[ ! -e "${TRAFFIC_TEST_FAIL_READINESS:-/nonexistent}" ]]
       exit
     fi
@@ -135,6 +140,7 @@ YAML
 export PATH="${BIN}:${PATH}"
 export TRAFFIC_TEST_LOG="${LOG}"
 export TRAFFIC_TEST_DB="${DB}"
+export TRAFFIC_TEST_EXECUTABLE=wg
 export TRAFFIC_TEST_START_COUNT="${TMP}/start-count"
 printf '0\n' >"${TRAFFIC_TEST_START_COUNT}"
 
@@ -214,19 +220,47 @@ ansible-playbook "${TMP}/playbook.yml" \
 [[ "$(<"${PROJECT}/.wg-traffic-mode")" == full ]]
 [[ "$(read_policy)" == '{"client": null, "firewall": 0, "routes": ["0.0.0.0/0"]}' ]]
 
-# An AmneziaWG host owns the interface through awg; readiness must query it
-# there because plain `wg show wg0` reports "Not supported" for such interfaces.
-amnezia_exec_before="$(grep -Ec '^docker exec ' "${LOG}" || true)"
+# Isolate each backend run: a previous successful query cannot satisfy it.
+export TRAFFIC_TEST_EXECUTABLE=awg
+: >"${LOG}"
+ansible-playbook "${TMP}/playbook.yml" \
+  -e wg_amnezia_enabled=true -e wg_traffic_mode=services >"${TMP}/amnezia-services.log"
+grep -Fxq 'docker exec wg-easy awg show wg0' "${LOG}"
+if grep -Eq '^docker exec wg-easy wg show' "${LOG}"; then
+  echo 'AmneziaWG services run queried the WG executable' >&2
+  exit 1
+fi
+[[ "$(<"${PROJECT}/.wg-traffic-mode")" == services ]]
+[[ "$(read_policy)" == '{"client": ["10.8.0.0/24", "10.66.0.2/32", "10.66.0.3/32", "fd42:42:42::/64"], "firewall": 1, "routes": ["10.8.0.0/24", "10.66.0.2/32", "10.66.0.3/32", "fd42:42:42::/64"]}' ]]
+: >"${LOG}"
 ansible-playbook "${TMP}/playbook.yml" \
   -e wg_amnezia_enabled=true -e wg_traffic_mode=full >"${TMP}/amnezia.log"
-grep -Fq 'docker exec wg-easy awg show wg0' "${LOG}"
-if [[ "$(grep -Ec '^docker exec ' "${LOG}" || true)" -le "${amnezia_exec_before}" ]]; then
-  echo 'AmneziaWG run skipped live validation entirely' >&2
+grep -Fxq 'docker exec wg-easy awg show wg0' "${LOG}"
+if grep -Eq '^docker exec wg-easy wg show' "${LOG}"; then
+  echo 'AmneziaWG full run queried the WG executable' >&2
   exit 1
 fi
 [[ "$(<"${PROJECT}/.wg-traffic-mode")" == full ]]
+[[ "$(read_policy)" == '{"client": null, "firewall": 0, "routes": ["0.0.0.0/0"]}' ]]
+
+cp "${DB}" "${TMP}/before-wrong-tool.db"
+cp "${PROJECT}/.wg-traffic-mode" "${TMP}/before-wrong-tool.marker"
+: >"${LOG}"
+if ansible-playbook "${TMP}/playbook.yml" -e wg_traffic_mode=full >"${TMP}/wrong-tool.log" 2>&1; then
+  echo 'plain WG executable unexpectedly accepted an AWG interface' >&2
+  exit 1
+fi
+grep -Fxq 'docker exec wg-easy wg show wg0' "${LOG}"
+grep -Fq 'original wg-easy state was restored' "${TMP}/wrong-tool.log"
+cmp "${DB}" "${TMP}/before-wrong-tool.db"
+cmp "${PROJECT}/.wg-traffic-mode" "${TMP}/before-wrong-tool.marker"
+[[ -z "$(find "${PROJECT}" -maxdepth 1 -name '.wg-traffic-mode.transaction.*' -print -quit)" ]]
+
+export TRAFFIC_TEST_EXECUTABLE=wg
+: >"${LOG}"
 ansible-playbook "${TMP}/playbook.yml" -e wg_traffic_mode=full >"${TMP}/amnezia-rerun.log"
-if grep -Fq 'docker exec wg-easy awg show wg0' "${TMP}/amnezia-rerun.log"; then
+grep -Fxq 'docker exec wg-easy wg show wg0' "${LOG}"
+if grep -Eq '^docker exec wg-easy awg show' "${LOG}"; then
   echo 'non-AmneziaWG run still queried the awg executable' >&2
   exit 1
 fi
@@ -372,6 +406,7 @@ for required in ("firewall_enabled", "WG_CLIENTS", "vps_orchestration_wg_executa
 PY
 
 printf '[PASS] amneziawg=live_readiness_uses_awg_executable; plain_mode_uses_wg\n'
+printf '[PASS] backend_runs=AWG_services,AWG_full,WG_full; wrong_tool=rejected,db_and_marker_restored,no_transaction_residue\n'
 printf '[PASS] services=private_routes,firewall_enabled,WG_CLIENTS_v4_v6_terminal_drop\n'
 printf '[PASS] full=default_routes,firewall_disabled\n'
 printf '[PASS] marker_drift=reconciled_from_database\n'

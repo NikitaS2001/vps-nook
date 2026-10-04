@@ -24,7 +24,7 @@
 
 - name: "Verify | WG | Wait for the WireGuard interface in wg-easy"
   ansible.builtin.command: >-
-    docker exec wg-easy {{ vps_orchestration_wg_executable }} show
+    docker exec wg-easy {{ vps_orchestration_wg_executable }} show wg0
   register: vps_orchestration_wg_show
   changed_when: false
   retries: 18
