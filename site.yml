@@ -2,6 +2,13 @@
 - name: "VPS Nook | Hardening"
   hosts: vps
   gather_facts: yes
+  pre_tasks:
+    - name: "AmneziaWG | Preflight | Refuse unsafe boot policy before hardening"
+      ansible.builtin.script:
+        cmd: "{{ playbook_dir }}/roles/vps_orchestration/files/awg_module.py pre-hardening"
+      changed_when: false
+      when: wg_amnezia_enabled | default(false) | bool
+      tags: [always]
   become: yes
   roles:
     - role: vps_hardening

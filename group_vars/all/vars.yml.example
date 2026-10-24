@@ -1,12 +1,15 @@
 ---
 # Network
 wg_traffic_mode: "services"
-# Backend is independent of services/full routing; ordinary WireGuard is default.
-# Fresh controller AWG requires an operator-prepared matching kernel module and
-# client; no automatic module build/install/download or userspace fallback.
-# Installer equivalent: NOOK_VPN_BACKEND=wg|awg; reruns cannot switch saved backend.
-# Existing peers are not silently migrated; refresh profiles and use a matching
-# client. See docs/configuration.md and docs/operations.md before enabling.
+# Backend is independent of services/full routing. Ordinary WireGuard is default.
+# The shared role automatically prepares the pinned module for fresh controller AWG.
+# Use a supported kernel. Use a matching client.
+# There is no userspace fallback or automatic reboot.
+# Installer equivalent: NOOK_VPN_BACKEND=wg|awg.
+# Installer reruns cannot switch the saved backend.
+# Existing peers are not silently migrated.
+# Refresh profiles. Use a matching client.
+# Read docs/configuration.md and docs/operations.md before enabling AWG.
 # wg_amnezia_enabled: true
 ssh_port: 2222
 wg_port: 51820

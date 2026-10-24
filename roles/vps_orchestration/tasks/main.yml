@@ -50,25 +50,22 @@
     fail_msg: "wg_traffic_mode must be exactly services or full"
   tags: [compose, traffic_mode]
 
-- name: "VPS Orchestration | Preflight | Validate AmneziaWG module state"
-  ansible.builtin.command:
-    argv: [modinfo, "{{ wg_amnezia_kernel_module }}"]
-  register: vps_orchestration_amnezia_modinfo
+- name: "VPS Orchestration | Preflight | Check automatic AmneziaWG feasibility"
+  ansible.builtin.script:
+    cmd: "awg_module.py preflight"
+    executable: /usr/bin/python3
   changed_when: false
-  failed_when: false
   when: wg_amnezia_enabled | bool
-  tags: [compose, traffic_mode]
+  tags: [docker, compose, traffic_mode]
 
-- name: "VPS Orchestration | Preflight | Require AmneziaWG kernel module availability"
+- name: "VPS Orchestration | Preflight | Require supported AmneziaWG identities"
   ansible.builtin.assert:
     that:
-      - vps_orchestration_amnezia_modinfo.rc == 0
-    fail_msg: >-
-      wg_amnezia_enabled is set but modinfo {{ wg_amnezia_kernel_module }}
-      failed on this host; install the module before deployment
-      (see docs/operations.md)
+      - wg_amnezia_kernel_module == 'amneziawg'
+      - wg_amnezia_overrided_executable == 'awg'
+    fail_msg: "Automatic AWG preparation supports only the pinned amneziawg module and awg tools"
   when: wg_amnezia_enabled | bool
-  tags: [compose, traffic_mode]
+  tags: [docker, compose, traffic_mode]
 
 - name: "VPS Orchestration | Preflight | Validate traffic subnets"
   ansible.builtin.command:

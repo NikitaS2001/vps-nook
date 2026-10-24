@@ -26,8 +26,9 @@ services:
       DISABLE_IPV6: "false"
 {% if (wg_amnezia_enabled | default(false) | bool) %}
       # AmneziaWG is selected explicitly because the container cannot inspect
-      # host kernel modules; the host module is asserted during preflight.
+      # host kernel modules; the role prepares and verifies the kernel backend.
       EXPERIMENTAL_AWG: "true"
+      WG_QUICK_USERSPACE_IMPLEMENTATION: "/bin/false"
       OVERRIDE_AUTO_AWG: {{ wg_amnezia_overrided_executable | string | to_json }}
 {% endif %}
 {% if (wg_easy_include_init | default(false) | bool) %}

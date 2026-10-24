@@ -26,7 +26,8 @@ trap cleanup EXIT INT TERM
 chmod 700 "${FIXTURE_ROOT}"
 
 render_case() {
-  local case_name="$1"
+  local case_base="$1" backend="${2:-wg}"
+  local case_name="${case_base}-${backend}"
   local vars_path="${FIXTURE_ROOT}/${case_name}.json"
   local expected_path="${FIXTURE_ROOT}/${case_name}.expected"
   local rendered_path="${FIXTURE_ROOT}/${case_name}.yml"
@@ -40,7 +41,7 @@ render_case() {
     "${project_root}/volumes/wg-easy" "${project_root}/Caddyfile.d"
   chmod 600 "${project_root}/Caddyfile"
 
-  CASE_NAME="${case_name}" VARS_PATH="${vars_path}" EXPECTED_PATH="${expected_path}" \
+  CASE_NAME="${case_base}" BACKEND="${backend}" VARS_PATH="${vars_path}" EXPECTED_PATH="${expected_path}" \
     PROJECT_ROOT="${project_root}" python3 - <<'PY'
 import json
 import os
@@ -74,6 +75,8 @@ variables = {
     "wg_easy_version": "15.4.0",
     "wg_easy_image_digest": "sha256:0e7bc9d34e86ddcaa92bc700d4d7dc9b33291dbc07ac8d13382f7c2095f949ec",
     "wg_port": 51820,
+    "wg_amnezia_enabled": os.environ["BACKEND"] == "awg",
+    "wg_amnezia_overrided_executable": "awg",
     "wg_public_host": "vpn.example.test",
     "wg_services_only_ipv4_destinations": ["10.8.0.0/24", "10.66.0.2/32"],
     "wg_services_only_ipv6_destinations": ["fd42:42:42::/64"],
@@ -114,7 +117,7 @@ YAML
     "${FIXTURE_ROOT}/${case_name}.ansible.log" \
     "${FIXTURE_ROOT}/${case_name}.compose.log"
 
-  CASE_NAME="${case_name}" CONFIG_PATH="${config_path}" \
+  CASE_NAME="${case_base}" BACKEND="${backend}" CONFIG_PATH="${config_path}" \
     EXPECTED_PATH="${expected_path}" python3 - <<'PY'
 import json
 import os
@@ -123,6 +126,16 @@ from pathlib import Path
 config = json.loads(Path(os.environ["CONFIG_PATH"]).read_text(encoding="utf-8"))
 expected = Path(os.environ["EXPECTED_PATH"]).read_text(encoding="utf-8")
 environment = config["services"]["wg-easy"]["environment"]
+service = config["services"]["wg-easy"]
+assert service.get("privileged", False) is False
+assert service["cap_add"] == ["NET_ADMIN"]
+assert all("/lib/modules" not in volume.get("source", "") for volume in service["volumes"])
+if os.environ["BACKEND"] == "awg":
+    assert environment["EXPERIMENTAL_AWG"] == "true"
+    assert environment["OVERRIDE_AUTO_AWG"] == "awg"
+    assert environment["WG_QUICK_USERSPACE_IMPLEMENTATION"] == "/bin/false"
+else:
+    assert not {"EXPERIMENTAL_AWG", "OVERRIDE_AUTO_AWG", "WG_QUICK_USERSPACE_IMPLEMENTATION"} & environment.keys()
 expects_init = os.environ["CASE_NAME"] in {"dollar", "scalars"}
 if not expects_init:
     if any(name.startswith("INIT_") for name in environment):
@@ -132,7 +145,7 @@ elif environment["INIT_PASSWORD"] != expected.replace("$", "$$"):
     raise SystemExit(1)
 PY
 
-  if [[ "${case_name}" == "completed" ]]; then
+  if [[ "${case_base}" == "completed" ]]; then
     return
   fi
   # Runtime assertion concerns environment bytes only. Do not allocate the
@@ -206,9 +219,12 @@ probe_failure_case() {
   fi
 }
 
-render_case dollar
-render_case scalars
-render_case completed
+render_case dollar wg
+render_case dollar awg
+render_case scalars wg
+render_case scalars awg
+render_case completed wg
+render_case completed awg
 printf '%s\n' 'password_exact=true' 'scalar_encoding=true' \
   'completed_secret_free=true' 'vault_only_bootstrap=true'
 

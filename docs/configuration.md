@@ -46,37 +46,91 @@ Transitions are transactional and require updated client profiles. There is no
 
 ## AmneziaWG
 
-The installer accepts `NOOK_VPN_BACKEND=wg|awg`: `wg` (ordinary WireGuard) is
-the default; `awg` selects AmneziaWG. Backend and traffic policy are independent:
-either backend can use `services` (default) or `full`. In controller variables,
-the corresponding role input is `wg_amnezia_enabled: false|true`.
+The installer accepts `NOOK_VPN_BACKEND=wg|awg`. The default, `wg`, selects
+ordinary WireGuard. The value `awg` selects AmneziaWG. Backend and traffic
+policy are independent. Either backend can use `services` (default) or `full`.
+In controller variables, the corresponding role input is
+`wg_amnezia_enabled: false|true`.
 
-AWG requires an operator-prepared host kernel module matching the running
-kernel and the tools in the pinned wg-easy image, plus a matching AmneziaWG
-client. The module name comes from the verified role default
-`wg_amnezia_kernel_module` (currently `amneziawg`). There is no automatic module
-build, installation, download, or userspace fallback.
+The shared orchestration role automatically prepares the host's AWG kernel module.
+The role uses pinned upstream source, authenticated distro DKMS/build packages,
+and headers for the exact running kernel. The installer only checks feasibility
+before fresh encrypted-state commitment. A matching AmneziaWG client is required.
 
-Before committing fresh encrypted inputs or running server roles, the installer
-checks module metadata with `modinfo`. The role also checks availability, then
-loads and persists the module with `modprobe`; failure stops deployment.
-Metadata availability does not prove successful loading or client
-interoperability. See [operations](operations.md#amneziawg-kernel-module) for
-module preparation and checks. wg-easy
-receives `EXPERIMENTAL_AWG`/`OVERRIDE_AUTO_AWG` so it selects AmneziaWG without
-inspecting host modules; the container gets no `/lib/modules` mount.
+Dependency preparation uses private transaction-local APT configuration, signed
+canonical distro archives, and private lists/cache. The role does not replace
+host APT configuration or accept third-party dependency candidates.
+Distro `python3-apt` is required. The role authenticates the complete required
+build/toolchain dependency graph against distro package payloads, including already-installed tools.
+
+Required installed packages may be reinstalled at exactly their installed
+versions. The role performs no broad upgrade or silent downgrade.
+The role refuses unavailable exact versions, changed conffiles, diversions, or
+unowned tools rather than adopting them. Package changes are not a package
+rollback transaction.
+
+Ubuntu uses a source-controlled official snapshot at `20260926T000000Z`, paired
+with the pinned stock-image checksum. This snapshot can authenticate exact
+already-installed base versions retired from current indices.
+Its negative APT priority and explicit resolver checks prohibit historical-only
+new dependency candidates. New packages require current canonical archive metadata.
+
+The snapshot retains Ubuntu archive signatures, TLS and APT validity checks.
+Historical authenticity does not prove freshness or patch status.
+A Release without `Valid-Until` supplies no expiry bound.
+
+The role checks the declared Release scope/date. Unavailable exact versions
+still fail closed. This anchor is not an environment or user override.
+It does not approve an arbitrary provider image's baseline.
+
+Supported platforms and resource requirements:
+
+- Debian 12 with a 6.1 `amd64` or `cloud-amd64` kernel.
+- Ubuntu 24.04 with a GA 6.8 `generic` kernel.
+- amd64 architecture and at least 900 MiB of OS-visible RAM.
+- At least 2 GiB of free build space before dependency installation.
+- At least 256 MiB of free build space remaining for compilation.
+- An available `/dev/net/tun` device.
+
+The role refuses other kernel flavours. It also refuses these host conditions:
+
+- Enabled or unknown Secure Boot, module signature enforcement, or lockdown.
+- Enabled unattended automatic reboot.
+- Active swap or any zram devices.
+
+Builds use one CPU, a 512 MiB memory limit, no build swap, and a 20-minute timeout.
+The role uses no PPA, userspace fallback, kernel replacement, or automatic reboot.
+
+The shared preflight runs before fresh encrypted-state commitment.
+Its network-backed signed dependency feasibility check has a separate
+24-minute installer budget, not the 30-second secret/vault command budget.
+Dependency, build or load failures after commitment preserve authoritative
+vault/backend inputs for rerun. The role preserves and refuses unknown
+module/DKMS state. WG does not install or download AWG dependencies.
+
+Module preparation precedes Docker. The role verifies version/vermagic and
+loaded identity before AWG bootstrap.
+
+wg-easy receives `EXPERIMENTAL_AWG`/`OVERRIDE_AUTO_AWG` and disables its userspace
+fallback. The container gets no `/lib/modules` mount or module privileges.
 
 New encrypted installer vaults persist `wg_amnezia_enabled` as the canonical
-lowercase `"false"` or `"true"` string; the installer passes it to Ansible as a
-native boolean. A legacy installer vault without that field means WG, without
-rewriting the vault. On rerun, omitting `NOOK_VPN_BACKEND` preserves the saved
-backend, a matching explicit value is accepted, and a conflicting value is
-rejected. The saved vault and vault-password file remain authoritative, with
-their bytes preserved on reuse and on prerequisite failure.
+lowercase `"false"` or `"true"` string.
+The installer passes the backend value to Ansible as a native boolean.
+A legacy installer vault without that field means WG, without rewriting the vault.
+On rerun:
 
-The installer does not migrate existing tunnels. Changing a controller variable
-is not a supported backend-transition procedure: AWG changes the wire protocol,
-and existing clients need refreshed profiles and a matching client application.
+- Omitting `NOOK_VPN_BACKEND` preserves the saved backend.
+- A matching explicit value is accepted.
+- A conflicting value is rejected.
+
+The saved vault and vault-password file remain authoritative.
+The installer preserves their bytes on reuse and on prerequisite failure.
+
+The installer does not migrate existing tunnels.
+Changing a controller variable is not a supported backend-transition procedure.
+AWG changes the wire protocol.
+Existing clients need refreshed profiles and a matching client application.
 Do not assume initialized peers are converted automatically.
 
 ## Ports and identity
@@ -145,7 +199,7 @@ shell history or repository files.
 | `NOOK_SSH_PUBKEY` | Fresh-install administrator's OpenSSH public key |
 | `NOOK_WG_HOST` | Public WireGuard hostname or IPv4; detected when omitted |
 | `NOOK_WG_TRAFFIC_MODE` | `services` (default) or `full` |
-| `NOOK_VPN_BACKEND` | `wg` (default) or `awg`; independent of traffic mode; AWG requires a prepared module and matching client |
+| `NOOK_VPN_BACKEND` | `wg` (default) or `awg`. Independent of traffic mode. For AWG, the shared role prepares the module automatically. A matching client is required. |
 | `NOOK_SSH_PORT`, `NOOK_WG_PORT` | Optional ports; defaults come from the roles |
 | `NOOK_ADMIN_USER` | Optional administrator username |
 | `NOOK_INTERNAL_DOMAIN_SUFFIX` | Optional internal DNS suffix |

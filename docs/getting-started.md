@@ -37,10 +37,10 @@ history. The wizard uses hidden input and confirms each password.
 
 On a fresh installation, the network step offers WireGuard (default) or
 AmneziaWG, then independently offers `services` (default) or `full` routing.
-Prepare the [matching AWG module and client](operations.md#amneziawg-kernel-module)
-before choosing AmneziaWG; the installer does not build or install that module.
+Use a [supported kernel and matching AWG client](operations.md#amneziawg-kernel-module)
+before choosing AmneziaWG. The shared role installs the module automatically.
 The review displays `VPN backend`. Choose edit field **8 (VPN backend)** to
-change the fresh selection before installation, then review it again.
+change the fresh selection before installation. Review the selection again.
 Automation uses `NOOK_VPN_BACKEND=wg|awg` on the executing Bash process.
 
 Piping a script to Bash executes bytes trusted through HTTPS. The installer's
@@ -106,10 +106,12 @@ Edit the inventory and variables. Replace every vault placeholder, including
 `vault_wg_easy_bootstrap_secret`, and `vault_admin_ssh_pubkey`. The wg-easy
 secret must be at least 12 characters. Set `wg_public_host` and review
 `wg_traffic_mode`.
-For a fresh AWG deployment, prepare the matching module first and set
-`wg_amnezia_enabled: true` in controller variables. Its default is `false`,
-independent of routing. This input is not a supported conversion procedure for
-an initialized WG deployment.
+For a fresh AWG deployment, set `wg_amnezia_enabled: true` in controller
+variables. The shared role prepares the module automatically on supported hosts.
+The `wg_amnezia_enabled` input defaults to `false`, independently of routing.
+This input is not a supported conversion procedure for an initialized WG deployment.
+For a separately confirmed disposable provider smoke test, follow the
+[AWG operations checklist](operations.md#disposable-pre-release-awg-smoke).
 
 Bootstrap the pinned controller toolchain, then encrypt both vault files before
 running the playbook:

@@ -54,10 +54,10 @@ for module in iptable_filter ip6table_filter iptable_nat ip6table_nat xt_MASQUER
 done
 
 grep -q '^wg_amnezia_enabled: false$' "${ROLE}/defaults/main.yml"
-grep -q 'modinfo' "${ROLE}/tasks/main.yml"
-grep -q 'wg_amnezia_kernel_module' "${ROLE}/tasks/netfilter_modules.yml"
-if grep -R -q -E 'dkms|kernel-mgmt|make -C' "${ROLE}/tasks"; then
-  echo 'role must not build kernel modules' >&2
+grep -q 'awg_module.py preflight' "${ROLE}/tasks/main.yml"
+grep -q 'amneziawg_prepare.yml' "${ROLE}/tasks/netfilter_modules.yml"
+if grep -R -q -E 'make -C|git clone'  "${ROLE}/tasks"; then
+  echo 'role must delegate compilation to the bounded pinned owner' >&2
   exit 1
 fi
 grep -q 'OVERRIDE_AUTO_AWG' "${ROLE}/templates/docker-compose.yml.j2"

@@ -20,14 +20,15 @@ cp "${ROOT_DIR}/roles/vps_orchestration/defaults/main.yml" \
     "${REPO_DIR}/roles/vps_orchestration/defaults/main.yml"
 export PATH="${TMP}/bin:${PATH}"
 export MODULE_TRACE="${TMP}/module-trace"
-cat >"${TMP}/bin/modinfo" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\n' "$*" >>"${MODULE_TRACE}"
-[[ "$#" -eq 1 && "$1" == "${EXPECTED_MODULE:-amneziawg}" ]] || exit 91
-exit "${MODULE_RC:-0}"
-SH
-chmod 0700 "${TMP}/bin/modinfo"
+mkdir -p "${REPO_DIR}/roles/vps_orchestration/files"
+cat >"${REPO_DIR}/roles/vps_orchestration/files/awg_module.py" <<'PYTHON'
+import os
+import sys
+from pathlib import Path
+assert sys.argv[1:] == ['preflight']
+Path(os.environ['MODULE_TRACE']).write_text('verified-role-preflight')
+sys.exit(int(os.environ.get('MODULE_RC', '0')))
+PYTHON
 
 configure_fixture() {
     local state="$1"
@@ -209,63 +210,36 @@ run_backend_roundtrip() {
 }
 
 run_backend_preflight() {
-    local scenario rc before
-    for scenario in missing-tool missing-module; do
-        configure_fixture "${TMP}/fresh-${scenario}"
-        configure_backend_pull true
-        set_inputs
-        VPN_BACKEND=awg
-        rm -f -- "${MODULE_TRACE}"
-        set +e
-        (
-            set -e
-            if [[ "${scenario}" == missing-tool ]]; then
-                command() {
-                    [[ "$*" != '-v modinfo' ]] || return 1
-                    builtin command "$@"
-                }
-            else
-                export MODULE_RC=1
-            fi
-            run_ansible_pull
-        ) >"${TMP}/${scenario}.log" 2>&1
-        rc=$?
-        set -e
-        [[ "${rc}" -eq 1 ]] || fail "${scenario}: expected exit 1, got ${rc}"
-        [[ ! -e "${VAULT_FILE}" && ! -e "${VAULT_PASS_FILE}" && ! -e "${VAULT_MARKER}" \
-            && ! -e "${VAULT_DIR}/applied" && ! -e "${VAULT_DIR}/pull.args.json" ]] \
-            || fail "${scenario}: fresh metadata failure committed state or invoked Ansible"
-        if [[ "${scenario}" == missing-tool ]]; then
-            [[ ! -e "${MODULE_TRACE}" ]] || fail 'missing modinfo still probed metadata'
-            grep -q 'modinfo.*required' "${TMP}/${scenario}.log" || fail 'missing-tool diagnostic absent'
-        else
-            [[ "$(<"${MODULE_TRACE}")" == amneziawg ]] || fail 'wrong module was probed'
-            grep -q 'module.*amneziawg.*unavailable' "${TMP}/${scenario}.log" || fail 'missing-module diagnostic absent'
-        fi
-        printf '[PASS] backend-preflight: %s exit=1 no-commit no-Ansible\n' "${scenario}"
-    done
+    local rc before
+    configure_fixture "${TMP}/fresh-unsupported-platform"
+    configure_backend_pull true
+    set_inputs
+    VPN_BACKEND=awg
+    set +e
+    (set -e; MODULE_RC=1 run_ansible_pull) >"${TMP}/unsupported.log" 2>&1
+    rc=$?
+    set -e
+    [[ "${rc}" -eq 1 ]] || fail "infeasible platform was accepted"
+    [[ ! -e "${VAULT_FILE}" && ! -e "${VAULT_PASS_FILE}" && ! -e "${VAULT_MARKER}" \
+        && ! -e "${VAULT_DIR}/applied" ]] || fail 'preflight committed fresh state or deployed'
+    [[ "$(<"${MODULE_TRACE}")" == verified-role-preflight ]] || fail 'wrong preflight owner'
 
     configure_fixture "${TMP}/preflight-wg"
     configure_backend_pull
     set_inputs
     rm -f -- "${MODULE_TRACE}"
     MODULE_RC=1 run_ansible_pull
-    [[ ! -e "${MODULE_TRACE}" ]] || fail 'WG probed AWG metadata'
-    printf '[PASS] backend-preflight: WG exit=0 no-AWG-probe\n'
+    [[ ! -e "${MODULE_TRACE}" ]] || fail 'WG ran AWG preflight'
 
-    configure_fixture "${TMP}/preflight-awg"
+    configure_fixture "${TMP}/preflight-fresh-awg"
     configure_backend_pull true
     set_inputs
     VPN_BACKEND=awg
-    # A different verified default must control the probe, not a hardcoded name.
-    sed -i 's/^wg_amnezia_kernel_module:.*/wg_amnezia_kernel_module: "fixture_awg"/' \
-        "${REPO_DIR}/roles/vps_orchestration/defaults/main.yml"
-    EXPECTED_MODULE=fixture_awg run_ansible_pull
-    cp "${ROOT_DIR}/roles/vps_orchestration/defaults/main.yml" \
-        "${REPO_DIR}/roles/vps_orchestration/defaults/main.yml"
+    # Feasibility owner permits a fresh host without an installed module.
+    run_ansible_pull
     before="$(sha256sum "${VAULT_PASS_FILE}" "${VAULT_FILE}")"
     clear_inputs
-    MODULE_RC=1 assert_backend_rejected saved-awg-missing-module
+    MODULE_RC=1 assert_backend_rejected saved-awg-infeasible
     [[ "${before}" == "$(sha256sum "${VAULT_PASS_FILE}" "${VAULT_FILE}")" ]] || fail 'preflight changed saved state'
     clear_inputs
     set +e
@@ -275,7 +249,7 @@ run_backend_preflight() {
     [[ "${rc}" -eq 1 && -e "${VAULT_DIR}/applied" ]] || fail 'later loader failure did not propagate'
     [[ "${before}" == "$(sha256sum "${VAULT_PASS_FILE}" "${VAULT_FILE}")" ]] || fail 'loader failure changed saved state'
     [[ ! -e "${VAULT_MARKER}" ]] || fail 'role invocation retained transaction marker'
-    printf '[PASS] backend-preflight: verified-default AWG; saved metadata and later-role failures preserve pair\n'
+    printf '[PASS] backend-preflight: shared owner; WG bypass; fresh refusal and saved failures preserve state\n'
 }
 
 run_backend_legacy() {

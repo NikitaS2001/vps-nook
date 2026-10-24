@@ -7,22 +7,27 @@
     cache_valid_time: 3600
   tags: [docker, compose, traffic_mode]
 
-- name: "Netfilter | Runtime | Load and persist the AmneziaWG kernel module"
-  community.general.modprobe:
-    name: "{{ wg_amnezia_kernel_module }}"
-    state: present
-    persistent: present
-  register: vps_orchestration_amnezia_module
+- name: "Netfilter | Prepare | Install verified AmneziaWG module"
+  ansible.builtin.include_tasks:
+    file: amneziawg_prepare.yml
+    apply:
+      tags: [docker, compose, traffic_mode]
   when: wg_amnezia_enabled | bool
   tags: [docker, compose, traffic_mode]
 
-- name: "Netfilter | Runtime | Fail closed when AmneziaWG was requested but unavailable"
-  ansible.builtin.assert:
-    that:
-      - vps_orchestration_amnezia_module is not failed
-    fail_msg: >-
-      wg_amnezia_enabled is set but the {{ wg_amnezia_kernel_module }} kernel
-      module could not be loaded; install it and retry (see docs/operations.md)
+- name: "Netfilter | Runtime | Persist the verified AmneziaWG kernel module"
+  community.general.modprobe:
+    name: amneziawg
+    state: present
+    persistent: present
+  when: wg_amnezia_enabled | bool
+  tags: [docker, compose, traffic_mode]
+
+- name: "Netfilter | Runtime | Confirm persistent AmneziaWG readiness"
+  ansible.builtin.command:
+    argv: [/usr/bin/python3, /usr/local/lib/vps-nook/awg_module.py, ready]
+  register: vps_orchestration_awg_ready
+  changed_when: (vps_orchestration_awg_ready.stdout | from_json).changed | bool
   when: wg_amnezia_enabled | bool
   tags: [docker, compose, traffic_mode]
 

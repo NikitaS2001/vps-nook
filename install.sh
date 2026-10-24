@@ -29,6 +29,9 @@ VAULT_PYTHON_BIN="${VENV_DIR}/bin/python"
 ANSIBLE_PULL_BIN="${VENV_DIR}/bin/ansible-pull"
 OPENSSL_BIN="openssl"
 VAULT_COMMAND_TIMEOUT=30
+# Network-backed signed dependency feasibility is bounded separately from secret
+# reads/vault commands; this covers the shared owner budget plus exit allowance.
+AWG_PREFLIGHT_TIMEOUT=1440
 ANSIBLE_PULL_TIMEOUT=3600
 
 RESOLVED_RELEASE_REF=""
@@ -192,6 +195,18 @@ Non-interactive mode for automated testing:
   NOOK_WG_TRAFFIC_MODE   VPN routing: services or full
                           (optional, default services)
   NOOK_VPN_BACKEND       VPN backend: wg or awg (optional, default wg)
+
+  The shared role prepares the pinned AWG host module. The installer only checks
+  feasibility before it commits encrypted state.
+  AWG requires:
+    - Debian 12 with a 6.1 amd64/cloud-amd64 kernel, or Ubuntu 24.04 with a
+      GA 6.8 generic kernel, on x86_64.
+    - systemd/cgroup v2 and TUN.
+    - At least 900 MiB of OS-visible RAM and no active swap or zram devices.
+    - 2 GiB free before dependency installation and 256 MiB free before build.
+  AWG refuses enabled or unknown Secure Boot, module signature enforcement,
+  or lockdown. It also refuses enabled unattended-upgrades automatic reboot.
+  The installer never reboots. Use a matching AmneziaWG client.
 
 On rerun, the encrypted installer state is authoritative. Omit credential
 inputs; any supplied non-secret input must match its persisted value.
@@ -783,7 +798,7 @@ choose_traffic_mode() {
 choose_vpn_backend() {
     local selection
     printf '\n  1  WireGuard [default]\n  2  AmneziaWG\n'
-    printf '     Requires an operator-prepared AmneziaWG kernel module and matching client.\n\n'
+    printf '     Automatically prepares the AmneziaWG kernel module; requires a matching client.\n\n'
     while true; do
         prompt_choice selection "VPN backend (1 or 2)" "$([[ ${VPN_BACKEND} == awg ]] && echo 2 || echo 1)"
         case "${selection}" in
@@ -1336,17 +1351,12 @@ create_installer_vault() {
 }
 
 require_selected_backend() {
-    local module
-
     validate_vpn_backend
     [[ "${VPN_BACKEND}" == awg ]] || return 0
-    module="$(read_yaml_scalar_default "${REPO_DIR}/roles/vps_orchestration/defaults/main.yml" wg_amnezia_kernel_module)"
-    [[ "${module}" =~ ^[A-Za-z0-9_][A-Za-z0-9_-]*$ ]] \
-        || error "Verified role defaults contain an invalid AmneziaWG module name."
-    command -v modinfo >/dev/null 2>&1 \
-        || error "modinfo is required to check the prepared AmneziaWG kernel module."
-    timeout "${VAULT_COMMAND_TIMEOUT}" modinfo "${module}" >/dev/null 2>&1 \
-        || error "AmneziaWG kernel module ${module} is unavailable; prepare it before installing."
+    local owner="${REPO_DIR}/roles/vps_orchestration/files/awg_module.py"
+    [[ -f "${owner}" && ! -L "${owner}" ]] || error "Verified AWG preflight owner is unavailable."
+    timeout "${AWG_PREFLIGHT_TIMEOUT}" "${VAULT_PYTHON_BIN}" "${owner}" preflight \
+        || error "Automatic AmneziaWG preparation is infeasible on this host."
 }
 
 prepare_installer_vault() {

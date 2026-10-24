@@ -4,10 +4,10 @@ Notable changes are recorded here. The project follows Semantic Versioning.
 
 ## Unreleased
 
-- Add optional AmneziaWG support through `wg_amnezia_enabled`: assert and persist the host kernel module, select it in wg-easy without a `/lib/modules` mount, and use `awg` for live interface checks.
-- Add installer backend choice and edit field 8, with `NOOK_VPN_BACKEND=wg|awg` (default WG) independent of `services`/`full` routing.
-- Persist the canonical encrypted backend value; legacy vaults remain WG, and reruns preserve saved vault/password bytes, accept matching backend input, and reject switches.
-- Require an operator-prepared matching AWG module and client; distinguish early metadata checks from loading and interoperability, with no automatic module build/install/download, userspace fallback, or silent peer migration.
+- Add optional AmneziaWG support through `wg_amnezia_enabled`. Check the host kernel module. Persist it. Select it in wg-easy without a `/lib/modules` mount. Use `awg` for live interface checks.
+- Add installer backend choice and edit field 8. The `NOOK_VPN_BACKEND=wg|awg` input defaults to WG, independently of `services`/`full` routing.
+- Persist the canonical encrypted backend value. Legacy vaults remain WG. Reruns preserve saved vault/password bytes, accept matching backend input, and reject switches.
+- Prepare pinned AWG source through distro DKMS and exact running-kernel headers. Share preflight between the installer and the controller. Preserve rerun state. Reject unsupported kernels and unattended reboot. Reject enabled or unknown Secure Boot, module signature enforcement, or lockdown. Matching clients remain required.
 - Prevent SIGPIPE failures in the synthetic health check when many peers report handshake timestamps.
 - Execute the guest sudo/PTY wrapper by script path while preserving piped installer input and hidden password checks.
 - Refresh the pinned Debian stock test image so AWG can authenticate its installed dependency versions without upgrading the guest.

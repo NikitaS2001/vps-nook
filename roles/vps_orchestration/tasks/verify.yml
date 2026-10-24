@@ -32,6 +32,22 @@
   until: vps_orchestration_wg_show.rc == 0
   tags: [verify]
 
+- name: "Verify | AWG | Inspect kernel interface type"
+  ansible.builtin.command:
+    argv: [docker, exec, wg-easy, ip, -d, -j, link, show, dev, wg0]
+  register: vps_orchestration_awg_link
+  changed_when: false
+  when: wg_amnezia_enabled | bool
+  tags: [verify]
+
+- name: "Verify | AWG | Require the kernel AmneziaWG interface"
+  ansible.builtin.assert:
+    that:
+      - (vps_orchestration_awg_link.stdout | from_json | first).linkinfo.info_kind == 'amneziawg'
+    fail_msg: "AWG requires a kernel wg0 interface; userspace fallback is forbidden"
+  when: wg_amnezia_enabled | bool
+  tags: [verify]
+
 - name: "Verify | WG | Confirm wg-easy admin API enforces authentication"
   ansible.builtin.uri:
     url: "http://127.0.0.1:{{ wg_easy_bootstrap_ui_port }}/api/session"

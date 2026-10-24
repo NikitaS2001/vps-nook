@@ -1,0 +1,94 @@
+---
+- name: "AmneziaWG | Prepare | Inspect helper destination"
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - /usr/local/lib
+    - /usr/local/lib/vps-nook
+    - /usr/local/lib/vps-nook/awg_module.py
+  register: vps_orchestration_awg_helper_paths
+
+- name: "AmneziaWG | Prepare | Reject unsafe helper paths"
+  ansible.builtin.assert:
+    that:
+      - not (item.stat.islnk | default(false))
+      - not item.stat.exists or item.stat.uid == 0
+      - not item.stat.exists or item.stat.mode in ['0755', '0700', '0644', '0600']
+    fail_msg: "The AWG helper destination is unsafe. Preserve the destination for operator recovery."
+  loop: "{{ vps_orchestration_awg_helper_paths.results }}"
+
+- name: "AmneziaWG | Prepare | Create private helper directory"
+  ansible.builtin.file:
+    path: /usr/local/lib/vps-nook
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: "AmneziaWG | Prepare | Install shared transaction owner"
+  ansible.builtin.copy:
+    src: awg_module.py
+    dest: /usr/local/lib/vps-nook/awg_module.py
+    owner: root
+    group: root
+    mode: '0600'
+
+- name: "AmneziaWG | Prepare | Initialize guarded module state"
+  ansible.builtin.command:
+    argv: [/usr/bin/python3, /usr/local/lib/vps-nook/awg_module.py, initialize]
+  register: vps_orchestration_awg_initialize
+  changed_when: (vps_orchestration_awg_initialize.stdout | from_json).changed | bool
+
+- name: "AmneziaWG | Prepare | Authenticate exact distro dependency closure"
+  ansible.builtin.command:
+    argv: [/usr/bin/python3, /usr/local/lib/vps-nook/awg_module.py, dependencies]
+  register: vps_orchestration_awg_dependencies
+  changed_when: (vps_orchestration_awg_dependencies.stdout | from_json).changed | bool
+
+- name: "AmneziaWG | Prepare | Download pinned module source"
+  ansible.builtin.get_url:
+    url: "{{ (vps_orchestration_awg_initialize.stdout | from_json).source_url }}"
+    checksum: "{{ (vps_orchestration_awg_initialize.stdout | from_json).archive_checksum }}"
+    dest: /var/lib/vps-nook/amneziawg/source.tar.gz
+    owner: root
+    group: root
+    mode: '0600'
+    timeout: 120
+
+- name: "AmneziaWG | Prepare | Build install and verify running-kernel module"
+  ansible.builtin.command:
+    argv: [/usr/bin/python3, /usr/local/lib/vps-nook/awg_module.py, prepare]
+  register: vps_orchestration_awg_prepare
+  changed_when: (vps_orchestration_awg_prepare.stdout | from_json).changed | bool
+
+- name: "AmneziaWG | Update | Inspect kernel verification hooks"
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - /etc/kernel/header_postinst.d/zz-vps-nook-awg
+    - /etc/kernel/postinst.d/zz-vps-nook-awg
+  register: vps_orchestration_awg_kernel_hooks
+
+- name: "AmneziaWG | Update | Reject unsafe kernel verification hooks"
+  ansible.builtin.assert:
+    that:
+      - not (item.stat.islnk | default(false))
+      - not item.stat.exists or (item.stat.isreg and item.stat.uid == 0 and item.stat.mode == '0755')
+    fail_msg: "The AWG kernel verification hook is unsafe. Preserve the hook for operator recovery."
+  loop: "{{ vps_orchestration_awg_kernel_hooks.results }}"
+
+- name: "AmneziaWG | Update | Require receipt after distro DKMS hooks"
+  ansible.builtin.copy:
+    content: |
+      #!/bin/sh
+      set -eu
+      exec /usr/bin/python3 /usr/local/lib/vps-nook/awg_module.py verify-update --kernel "$1"
+    dest: "{{ item }}"
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - /etc/kernel/header_postinst.d/zz-vps-nook-awg
+    - /etc/kernel/postinst.d/zz-vps-nook-awg
