@@ -10,11 +10,26 @@ grep -q '^wg_traffic_mode: "services"$' "${ROLE}/defaults/main.yml"
 grep -q 'wg_easy_admin_password is not defined' "${ROLE}/tasks/main.yml"
 grep -q 'wg_easy_bootstrap_secret is defined' "${ROLE}/tasks/main.yml"
 
-if grep -R -E '^[[:space:]]+(apt|apt_repository|assert|command|copy|debug|fail|fetch|file|find|get_url|include_tasks|meta|service|set_fact|shell|slurp|stat|systemd|tempfile|template|uri|user|wait_for):' \
-    "${ROLE}/tasks" "${ROLE}/handlers"; then
-    echo 'non-FQCN builtin module found' >&2
-    exit 1
-fi
+python3 - "${ROLE}" <<'MODULE_KEYS'
+from pathlib import Path
+import sys
+import yaml
+
+builtins = {'apt', 'apt_repository', 'assert', 'command', 'copy', 'debug', 'fail', 'fetch', 'file',
+            'find', 'get_url', 'include_tasks', 'meta', 'service', 'set_fact', 'shell', 'slurp', 'stat',
+            'systemd', 'tempfile', 'template', 'uri', 'user', 'wait_for'}
+
+def check(tasks):
+    for task in tasks:
+        assert not builtins.intersection(task), 'non-FQCN builtin task module'
+        for boundary in ('block', 'rescue', 'always'):
+            if boundary in task:
+                check(task[boundary])
+
+for subtree in ('tasks', 'handlers'):
+    for path in (Path(sys.argv[1]) / subtree).glob('*.yml'):
+        check(yaml.safe_load(path.read_text()) or [])
+MODULE_KEYS
 
 grep -q -- '- NET_ADMIN' "${ROLE}/templates/docker-compose.yml.j2"
 if grep -q -E 'SYS_MODULE|/lib/modules' "${ROLE}/templates/docker-compose.yml.j2"; then
@@ -58,6 +73,210 @@ cleanup() {
 }
 trap cleanup EXIT
 mkdir -p "${TMP}/bin"
+# Execute the parsed transaction owners in Ansible. Only Docker, HTTP and the
+# two templates are sandbox boundaries; control flow and persisted operations
+# remain the owners' actual tasks.
+python3 - "${ROLE}" "${TMP}" <<'PY'
+import os
+from pathlib import Path
+import sqlite3
+import subprocess
+import sys
+import yaml
+
+role, private = map(Path, sys.argv[1:])
+sandbox = private / "compose"
+sandbox.mkdir(mode=0o700)
+template = sandbox / "docker-compose.yml.j2"
+template.write_text("services:\n  wg-easy:\n    environment:\n"
+                    "{% if wg_easy_include_init %}      INIT_PASSWORD: fixture-secret\n{% endif %}"
+                    "      SAFE: true\n")
+(sandbox / "Caddyfile.j2").write_text("new-managed\n")
+docker = sandbox / "docker"
+docker.write_text("""#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  image) echo fixture-image ;;
+  run)
+    for ((index=1; index<=$#; index++)); do
+      if [[ "${!index}" == --volume ]]; then
+        index=$((index + 1))
+        tree="${!index%%:/etc/caddy:ro}"
+        [[ "$(cat "${tree}/Caddyfile.d/operator.conf")" == operator-extension ]]
+        [[ "$(cat "${tree}/Caddyfile")" == new-managed ]]
+      fi
+    done
+    [[ "${COMPOSE_FAULT}" != caddy-validate ]] || exit 62 ;;
+  inspect)
+    if [[ "$*" == *State.Running* ]]; then echo true
+    elif [[ "$*" == *Config.Env* ]]; then
+      [[ "${COMPOSE_FAULT}" != inspect-env ]] || exit 70
+      cat "${COMPOSE_PROJECT}/runtime-env"
+    else exit 2; fi ;;
+  ps) [[ "${COMPOSE_FAULT}" != inspect ]] || exit 70; test ! -f "${COMPOSE_PROJECT}/runtime-env" || echo fixture-id ;;
+  rm)
+    [[ "${COMPOSE_FAULT}" != remove ]] || exit 71
+    [[ -f "${COMPOSE_PROJECT}/runtime-env" ]] || exit 1
+    rm "${COMPOSE_PROJECT}/runtime-env" ;;
+  exec)
+    [[ "${COMPOSE_FAULT}" != caddy-reload && "${COMPOSE_FAULT}" != caddy-rollback ]] || {
+      if [[ ! -f "${COMPOSE_PROJECT}/reload-failed" ]]; then
+        touch "${COMPOSE_PROJECT}/reload-failed"; exit 63
+      fi
+      [[ "${COMPOSE_FAULT}" != caddy-rollback ]] || exit 64
+    } ;;
+  compose)
+    # The operator's override links wg-easy to Caddy. Credential cleanup
+    # must target wg-easy without recreating either unrelated or linked UIs.
+    if [[ "${2:-}" == always && ( "${3:-}" == all || ( "${3:-}" == wg-easy && "${4:-}" == true ) ) ]]; then
+      printf 'recreated-caddy\n' >"${COMPOSE_PROJECT}/caddy-id"
+    fi
+    count=0
+    [[ ! -f "${COMPOSE_PROJECT}/compose-count" ]] || count="$(<"${COMPOSE_PROJECT}/compose-count")"
+    count=$((count + 1))
+    echo "${count}" >"${COMPOSE_PROJECT}/compose-count"
+    if [[ "${count}" == 1 && "${COMPOSE_FAULT}" == start ]]; then exit 61; fi
+    if [[ "${count}" -gt 1 && ( "${COMPOSE_FAULT}" == recreate || "${COMPOSE_FAULT}" == resecure-start ) ]]; then exit 65; fi
+    grep 'INIT_PASSWORD:' "${COMPOSE_PROJECT}/docker-compose.yml" \
+      | sed 's/.*INIT_PASSWORD: /INIT_PASSWORD=/' >"${COMPOSE_PROJECT}/runtime-env" || [[ "$?" == 1 ]]
+    ;;
+  login)
+    count=0
+    [[ ! -f "${COMPOSE_PROJECT}/login-count" ]] || count="$(<"${COMPOSE_PROJECT}/login-count")"
+    count=$((count + 1))
+    echo "${count}" >"${COMPOSE_PROJECT}/login-count"
+    case "${COMPOSE_FAULT}" in
+      success|cleanup|resecure-start) ;;
+      resecure-auth) [[ "${count}" == 1 ]] || exit 68 ;;
+      *) exit 66 ;;
+    esac ;;
+  cleanup) exit 67 ;;
+  *) exit 2 ;;
+esac
+""")
+docker.chmod(0o700)
+
+def adapt(tasks):
+    for task in tasks:
+        for section in ("block", "rescue", "always"):
+            if section in task:
+                adapt(task[section])
+        if "ansible.builtin.template" in task:
+            module = task["ansible.builtin.template"]
+            module["src"] = str(sandbox / module["src"])
+        if "community.docker.docker_compose_v2" in task:
+            module = task.pop("community.docker.docker_compose_v2")
+            task["ansible.builtin.command"] = {
+                "argv": ["docker", "compose", module.get("recreate", "auto"),
+                         *module.get("services", ["all"]), str(module.get("dependencies", True)).lower()]
+            }
+        if "ansible.builtin.uri" in task:
+            del task["ansible.builtin.uri"]
+            task["ansible.builtin.command"] = {"argv": ["docker", "login"]}
+            for key in ("until", "retries", "delay"):
+                task.pop(key, None)
+        if "ansible.builtin.include_tasks" in task:
+            task["ansible.builtin.include_tasks"] = str(sandbox / task["ansible.builtin.include_tasks"])
+
+for name in ("compose.yml", "compose_prepare.yml", "compose_lifecycle.yml", "caddy_transaction.yml"):
+    tasks = yaml.safe_load((role / "tasks" / name).read_text())
+    adapt(tasks)
+    (sandbox / name).write_text(yaml.safe_dump(tasks, sort_keys=False))
+
+scenarios = ("start", "caddy-validate", "caddy-reload", "caddy-rollback",
+             "bootstrap", "recreate", "remove", "inspect", "inspect-env",
+             "scrub", "cleanup", "resecure-start", "resecure-auth",
+             "success", "completed", "malformed")
+for scenario in scenarios:
+    project = sandbox / scenario
+    (project / "volumes/wg-easy").mkdir(parents=True, mode=0o700)
+    with sqlite3.connect(project / "volumes/wg-easy/wg-easy.db") as db:
+        db.execute("CREATE TABLE general_table (setup_step INTEGER)")
+        db.execute("INSERT INTO general_table VALUES (?)", (0 if scenario == "completed" else 1,))
+        if scenario == "malformed":
+            db.execute("ALTER TABLE general_table RENAME TO malformed_table")
+    database = (project / "volumes/wg-easy/wg-easy.db").read_bytes()
+    (project / "Caddyfile").write_text("old-managed\n")
+    (project / "caddy-id").write_text("retained-caddy\n")
+    inode = (project / "Caddyfile").stat().st_ino
+    (project / "Caddyfile.d").mkdir()
+    (project / "Caddyfile.d/operator.conf").write_text("operator-extension\n")
+    (project / "docker-compose.override.yml").write_text("services:\n  wg-easy:\n    depends_on: [caddy]\n")
+    override = (project / "docker-compose.override.yml").read_bytes()
+    play = [{"hosts": "localhost", "connection": "local", "gather_facts": False,
+             "vars": {"project_root": str(project), "caddy_version": "fixture",
+                      "caddy_image_digest": "sha256:fixture", "wg_easy_admin_user": "fixture",
+                      "wg_easy_bootstrap_secret": "fixture-secret", "wg_easy_bootstrap_ui_port": 51821},
+             "tasks": [{"ansible.builtin.include_tasks": str(sandbox / "compose.yml")}]}]
+    # A failed render is injected at its existing template boundary, after the
+    # credential render, not by changing the owner transaction structure.
+    if scenario in ("scrub", "cleanup"):
+        lifecycle = yaml.safe_load((sandbox / "compose_lifecycle.yml").read_text())
+        def break_scrub(tasks):
+            for task in tasks:
+                for section in ("block", "rescue", "always"):
+                    if section in task:
+                        break_scrub(task[section])
+                if task.get("vars", {}).get("wg_easy_include_init") is False:
+                    if scenario == "scrub":
+                        task["ansible.builtin.template"]["src"] = str(sandbox / "missing-template")
+                if scenario == "cleanup" and "ansible.builtin.find" in task:
+                    del task["ansible.builtin.find"]
+                    task["ansible.builtin.command"] = {"argv": ["docker", "cleanup"]}
+        break_scrub(lifecycle)
+        original = (sandbox / "compose_lifecycle.yml").read_text()
+        (sandbox / "compose_lifecycle.yml").write_text(yaml.safe_dump(lifecycle, sort_keys=False))
+        caller = yaml.safe_load((sandbox / "compose.yml").read_text())
+        break_scrub(caller)
+        caller_original = (sandbox / "compose.yml").read_text()
+        (sandbox / "compose.yml").write_text(yaml.safe_dump(caller, sort_keys=False))
+    playbook = sandbox / "play.yml"
+    playbook.write_text(yaml.safe_dump(play, sort_keys=False))
+    env = dict(os.environ, PATH=str(sandbox) + os.pathsep + os.environ["PATH"],
+               COMPOSE_PROJECT=str(project), COMPOSE_FAULT=scenario)
+    result = subprocess.run(["ansible-playbook", "-i", "localhost,", str(playbook)],
+                            env=env, capture_output=True, timeout=90)
+    if scenario in ("scrub", "cleanup"):
+        (sandbox / "compose_lifecycle.yml").write_text(original)
+        (sandbox / "compose.yml").write_text(caller_original)
+    text = result.stdout.decode()
+    compose = project / "docker-compose.yml"
+    init = compose.exists() and "INIT_PASSWORD:" in compose.read_text()
+    if scenario != "scrub":
+        assert not init, f"compose scenario={scenario} exit={result.returncode} persisted_INIT=true"
+    assert result.returncode == (0 if scenario in ("success", "completed") else 2), (scenario, result.returncode)
+    assert "fixture-secret" not in text, f"{scenario}: no_log leaked fixture credentials"
+    assert (project / "volumes/wg-easy/wg-easy.db").read_bytes() == database, scenario
+    assert (project / "caddy-id").read_text() == "retained-caddy\n", f"{scenario}: credential scrub recreated Caddy"
+    assert (project / "docker-compose.override.yml").read_bytes() == override, scenario
+    if scenario.startswith("caddy"):
+        assert (project / "Caddyfile").read_text() == "old-managed\n", scenario
+        assert (project / "Caddyfile").stat().st_ino == inode, scenario
+    assert not list(project.glob(".Caddyfile.candidate.*")), scenario
+    assert not list(project.glob(".Caddyfile.previous.*")), scenario
+    assert not list(project.glob(".caddy-validate.*")), scenario
+    if scenario not in ("success", "completed", "malformed"):
+        import re
+        primary_codes = {"start": 61, "caddy-validate": 62, "caddy-reload": 63, "caddy-rollback": 63,
+                         "bootstrap": 66, "recreate": 66, "remove": 66, "inspect": 66,
+                         "inspect-env": 66, "scrub": 66, "cleanup": 67,
+                         "resecure-start": 65, "resecure-auth": 68}
+        codes = re.findall(r"\(rc=(\d+)\)", text)
+        assert str(primary_codes[scenario]) in codes, (scenario, codes)
+        cleanup_failed = scenario in ("remove", "inspect", "inspect-env", "recreate", "scrub", "resecure-start")
+        actual_cleanup = re.findall(r"credential cleanup failed=(True|False)", text)
+        assert str(cleanup_failed) in actual_cleanup, (scenario, "cleanup_failed", actual_cleanup)
+        if scenario == "caddy-rollback":
+            assert "64" in codes, (scenario, codes)
+    if scenario == "scrub":
+        assert compose.stat().st_mode & 0o777 == 0o600, scenario
+        assert not (project / "runtime-env").exists(), scenario
+    elif scenario not in ("inspect", "inspect-env", "malformed"):
+        environment = project / "runtime-env"
+        assert not environment.exists() or "INIT_PASSWORD=" not in environment.read_text(), scenario
+    print(f"[PASS] compose-owner scenario={scenario} exit={result.returncode} "
+          f"persisted_INIT={str(init).lower()} sqlite_unchanged=true primary_preserved=true")
+PY
 cat >"${TMP}/bin/docker" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail

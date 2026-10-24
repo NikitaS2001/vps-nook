@@ -1,12 +1,185 @@
 ---
-- name: "Compose | Prepare | Include state detection and render"
-  ansible.builtin.include_tasks: compose_prepare.yml
+- name: "Compose | Transaction | Protect rendered bootstrap credentials"
   tags: [compose]
+  block:
+    - name: "Compose | Prepare | Include state detection and render"
+      ansible.builtin.include_tasks: compose_prepare.yml
 
-- name: "Compose | Caddy | Include validated activation transaction"
-  ansible.builtin.include_tasks: caddy_transaction.yml
-  tags: [compose]
+    - name: "Compose | Caddy | Include validated activation transaction"
+      ansible.builtin.include_tasks: caddy_transaction.yml
 
-- name: "Compose | Lifecycle | Include stack start and bootstrap cleanup"
-  ansible.builtin.include_tasks: compose_lifecycle.yml
-  tags: [compose]
+    - name: "Compose | Lifecycle | Include stack start and bootstrap cleanup"
+      ansible.builtin.include_tasks: compose_lifecycle.yml
+
+  rescue:
+    - name: "Compose | Rescue | Preserve redacted primary failure"
+      ansible.builtin.set_fact:
+        vps_orchestration_compose_primary_task: "{{ ansible_failed_task.name }}"
+        vps_orchestration_compose_primary_rc: "{{ ansible_failed_result.rc | default('unavailable') }}"
+      no_log: true
+
+    - name: "Compose | Rescue | Scrub rendered bootstrap state"
+      when: vps_orchestration_wg_easy_bootstrap_required | default(false) | bool
+      block:
+        - name: "Compose | Rescue | Render and verify secret-free persistent Compose"
+          block:
+            - name: "Compose | Rescue | Render Compose without INIT variables"
+              ansible.builtin.template:
+                src: docker-compose.yml.j2
+                dest: "{{ project_root }}/docker-compose.yml"
+                backup: no
+                mode: '0644'
+              vars:
+                wg_easy_include_init: false
+              no_log: true
+
+            - name: "Compose | Rescue | Inspect scrubbed persistent Compose"
+              ansible.builtin.command:
+                argv:
+                  - grep
+                  - -Eq
+                  - '^[[:space:]]+INIT_[A-Z_]+:'
+                  - "{{ project_root }}/docker-compose.yml"
+              register: vps_orchestration_wg_easy_rescue_compose_init
+              changed_when: false
+              failed_when: vps_orchestration_wg_easy_rescue_compose_init.rc not in [0, 1]
+              no_log: true
+
+            - name: "Compose | Rescue | Fail closed when persistent INIT variables remain"
+              ansible.builtin.fail:
+                msg: "persistent credential cleanup could not be verified"
+              when: vps_orchestration_wg_easy_rescue_compose_init.rc == 0
+              no_log: true
+          rescue:
+            - name: "Compose | Rescue | Record persistent cleanup failure"
+              ansible.builtin.set_fact:
+                vps_orchestration_compose_scrub_failed: true
+              no_log: true
+
+        - name: "Compose | Rescue | Query potentially credential-bearing wg-easy"
+          ansible.builtin.command:
+            argv: [docker, ps, --all, --filter, "name=^/wg-easy$", --format, "{{ '{{ .ID }}' }}"]
+          register: vps_orchestration_wg_easy_rescue_existing
+          changed_when: false
+          failed_when: false
+          no_log: true
+
+        - name: "Compose | Rescue | Remove potentially credential-bearing wg-easy"
+          ansible.builtin.command:
+            argv: [docker, rm, --force, wg-easy]
+          register: vps_orchestration_wg_easy_rescue_remove
+          changed_when: true
+          failed_when: false
+          no_log: true
+          when: >-
+            vps_orchestration_wg_easy_rescue_existing.rc != 0
+            or vps_orchestration_wg_easy_rescue_existing.stdout | length > 0
+
+        - name: "Compose | Rescue | Restore verified secret-free runtime"
+          when: not vps_orchestration_compose_scrub_failed | default(false) | bool
+          block:
+            - name: "Compose | Rescue | Recreate from verified secret-free Compose"
+              community.docker.docker_compose_v2:
+                project_src: "{{ project_root }}"
+                state: present
+                recreate: always
+                services: [wg-easy]
+                dependencies: false
+              no_log: true
+          rescue:
+            - name: "Compose | Rescue | Record runtime cleanup failure"
+              ansible.builtin.set_fact:
+                vps_orchestration_compose_recreate_failed: true
+              no_log: true
+
+        # An inspect error cannot prove absence: require a successful daemon
+        # query before accepting an absent container as secret-free.
+        - name: "Compose | Rescue | Query remaining wg-easy identity"
+          ansible.builtin.command:
+            argv: [docker, ps, --all, --filter, "name=^/wg-easy$", --format, "{{ '{{ .ID }}' }}"]
+          register: vps_orchestration_wg_easy_rescue_container
+          changed_when: false
+          failed_when: false
+          no_log: true
+
+        - name: "Compose | Rescue | Inspect scrubbed wg-easy environment"
+          ansible.builtin.command:
+            argv:
+              - docker
+              - inspect
+              - wg-easy
+              - --format
+              - "{{ '{{ range .Config.Env }}{{ println . }}{{ end }}' }}"
+          register: vps_orchestration_wg_easy_rescue_env
+          changed_when: false
+          failed_when: false
+          no_log: true
+          when:
+            - vps_orchestration_wg_easy_rescue_container.rc == 0
+            - vps_orchestration_wg_easy_rescue_container.stdout | length > 0
+
+        - name: "Compose | Rescue | Record credential scrub result"
+          ansible.builtin.set_fact:
+            vps_orchestration_wg_easy_rescue_secret_free: >-
+              {{ vps_orchestration_wg_easy_rescue_container.rc == 0
+                 and (vps_orchestration_wg_easy_rescue_container.stdout | length == 0
+                      or (vps_orchestration_wg_easy_rescue_env.rc | default(1) == 0
+                          and vps_orchestration_wg_easy_rescue_env.stdout_lines | default([])
+                              | select('match', '^INIT_')
+                              | reject('equalto', 'INIT_ENABLED=false') | list | length == 0)) }}
+            vps_orchestration_compose_cleanup_failed: >-
+              {{ vps_orchestration_compose_scrub_failed | default(false) | bool
+                 or vps_orchestration_wg_easy_rescue_existing.rc != 0
+                 or vps_orchestration_wg_easy_rescue_remove.rc | default(0) != 0
+                 or vps_orchestration_compose_recreate_failed | default(false) | bool
+                 or vps_orchestration_wg_easy_rescue_container.rc != 0
+                 or (vps_orchestration_wg_easy_rescue_container.stdout | length > 0
+                     and (vps_orchestration_wg_easy_rescue_env.rc | default(1) != 0
+                          or vps_orchestration_wg_easy_rescue_env.stdout_lines | default([])
+                             | select('match', '^INIT_')
+                             | reject('equalto', 'INIT_ENABLED=false') | list | length > 0)) }}
+          no_log: true
+
+        - name: "Compose | Rescue | Validate remaining credential state"
+          block:
+            - name: "Compose | Rescue | Fail closed when INIT_PASSWORD remains"
+              ansible.builtin.fail:
+                msg: "password cleanup could not be verified"
+              when:
+                - vps_orchestration_wg_easy_rescue_env.rc | default(1) == 0
+                - >-
+                  vps_orchestration_wg_easy_rescue_env.stdout_lines | default([])
+                  | select('match', '^INIT_PASSWORD=') | list | length > 0
+              no_log: true
+
+            - name: "Compose | Rescue | Fail closed when unsafe INIT variables remain"
+              ansible.builtin.fail:
+                msg: "credential cleanup could not be verified"
+              when: not vps_orchestration_wg_easy_rescue_secret_free | bool
+              no_log: true
+          rescue:
+            - name: "Compose | Rescue | Record credential verification failure"
+              ansible.builtin.set_fact:
+                vps_orchestration_compose_cleanup_failed: true
+              no_log: true
+
+    - name: "Compose | Rescue | Report primary and cleanup failure"
+      ansible.builtin.fail:
+        msg: >-
+          Compose transaction failed at {{ vps_orchestration_compose_primary_task }}
+          (rc={{ vps_orchestration_compose_primary_rc }});
+          credential cleanup failed={{ vps_orchestration_compose_cleanup_failed | default(false) | bool }}.
+          Persistent scrub failed={{ vps_orchestration_compose_scrub_failed | default(false) | bool }};
+          remove rc={{ vps_orchestration_wg_easy_rescue_remove.rc | default('unavailable') }};
+          recreate failed={{ vps_orchestration_compose_recreate_failed | default(false) | bool }};
+          container query rc={{ vps_orchestration_wg_easy_rescue_container.rc | default('unavailable') }};
+          environment query rc={{ vps_orchestration_wg_easy_rescue_env.rc | default('unavailable') }}.
+          Caddy primary={{ vps_orchestration_caddy_primary_task | default('none') }}
+          (rc={{ vps_orchestration_caddy_primary_rc | default('unavailable') }}).
+          Bootstrap primary={{ vps_orchestration_compose_bootstrap_task | default('none') }}
+          (rc={{ vps_orchestration_compose_bootstrap_rc | default('unavailable') }}).
+          {{ 'secret state was scrubbed and setup remains retryable'
+             if (vps_orchestration_wg_easy_bootstrap_required | default(false) | bool
+                 and not vps_orchestration_compose_cleanup_failed | default(false) | bool)
+             else 'credential cleanup could not be verified'
+             if vps_orchestration_compose_cleanup_failed | default(false) | bool else '' }}
