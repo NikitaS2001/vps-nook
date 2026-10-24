@@ -124,6 +124,8 @@ fi
 DEFAULT_IMAGE="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
 QEMU_IMAGE="${QEMU_IMAGE:-${DEFAULT_IMAGE}}"
 QEMU_USER="${QEMU_USER:-ubuntu}"
+QEMU_RAM_MIB="${QEMU_RAM_MIB:-2048}"
+[[ "${QEMU_RAM_MIB}" =~ ^[1-9][0-9]*$ ]] || fail "QEMU_RAM_MIB must be a positive integer"
 E2E_SOURCE_MODE="${E2E_SOURCE_MODE:-development}"
 INSTALL_REF="${INSTALL_REF:-$(git rev-parse --abbrev-ref HEAD)}"
 E2E_SSH_PORT="${E2E_SSH_PORT:-2222}"
@@ -555,7 +557,7 @@ echo "[E2E] installer_commit=$(git rev-parse HEAD)"
 echo "[E2E] source_mode=${E2E_SOURCE_MODE} ref=${INSTALL_REF} ssh_port=${E2E_SSH_PORT} wg_port=${E2E_WG_PORT} user=${QEMU_USER}"
 
 # --- guest image + cloud-init seed + boot ------------------------------------
-boot_vm "${TMP_DIR}" "${QEMU_IMAGE}" 20 2048 2 ztvps-e2e ztvps-e2e "" \
+boot_vm "${TMP_DIR}" "${QEMU_IMAGE}" 20 "${QEMU_RAM_MIB}" 2 ztvps-e2e ztvps-e2e "" \
     "hostfwd=tcp:127.0.0.1:${QEMU_SSH_PORT}-:22" \
     "hostfwd=tcp:127.0.0.1:${QEMU_ADMIN_PORT}-:${E2E_SSH_PORT}" \
     "hostfwd=udp:127.0.0.1:${QEMU_WG_PORT}-:${E2E_WG_PORT}"
@@ -580,6 +582,11 @@ copy_repo_to_guest "${GUEST}" "${QEMU_SSH_PORT}" "${TMP_DIR}/id_ed25519"
 echo "[E2E] Checking the installer sudo pipeline in a guest PTY..."
 run_remote "${GUEST}" "${QEMU_SSH_PORT}" "${TMP_DIR}/id_ed25519" \
     "cd /tmp/ztrepo && python3 -m tests.e2e.installer_sudo"
+
+if [[ "${NOOK_VPN_BACKEND}" == awg ]]; then
+    run_remote "${GUEST}" "${QEMU_SSH_PORT}" "${TMP_DIR}/id_ed25519" \
+        'sudo test ! -d /sys/module/amneziawg && sudo test ! -d /var/lib/dkms/amneziawg'
+fi
 
 if [[ "${DO_BOOTSTRAP_TIMEOUT}" == "true" ]]; then
     echo "[E2E] Injecting a bounded pre-setup wg-easy startup timeout..."

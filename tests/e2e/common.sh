@@ -458,10 +458,32 @@ boot_vm() {
     init_owned_qemu "${tmp_dir}"
 
     echo "[E2E] Preparing the cloud image..."
-    if [[ "${image}" == http* ]]; then
+    local cache_status helper_dir registry_file
+    if [[ "${image}" == https://* && -n "${QEMU_IMAGE_CACHE_DIR:-}" \
+        && -n "${QEMU_IMAGE_SHA256:-}" ]]; then
+        helper_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+        registry_file="${helper_dir}/../registry.py"
+        if python3 "${helper_dir}/qemu_image_cache.py" \
+            "${image}" "${QEMU_IMAGE_SHA256}" "${QEMU_IMAGE_CACHE_DIR}" \
+            "${registry_file}" "${tmp_dir}/cloud.img"; then
+            :
+        else
+            cache_status=$?
+            if (( cache_status != 3 )); then
+                fail "Registered stock-image cache refused or failed (status ${cache_status})"
+            fi
+            # Unregistered operator URLs are never cached; preserve the old path.
+            curl -fL --retry 3 -o "${tmp_dir}/cloud.img" "${image}"
+        fi
+    elif [[ "${image}" == http* ]]; then
         curl -fL --retry 3 -o "${tmp_dir}/cloud.img" "${image}"
     else
         cp "${image}" "${tmp_dir}/cloud.img"
+    fi
+    if [[ -n "${QEMU_IMAGE_SHA256:-}" ]]; then
+        [[ "${QEMU_IMAGE_SHA256}" =~ ^[0-9a-f]{64}$ ]] || fail "Invalid cloud image checksum"
+        printf '%s  %s\n' "${QEMU_IMAGE_SHA256}" "${tmp_dir}/cloud.img" | sha256sum --check --status \
+            || fail "Cloud image checksum mismatch; guest was not started"
     fi
     qemu-img create -f qcow2 -b "${tmp_dir}/cloud.img" -F qcow2 \
         "${tmp_dir}/disk.qcow2" "${disk_gb}G" >/dev/null

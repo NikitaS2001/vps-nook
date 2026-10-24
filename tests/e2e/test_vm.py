@@ -15,6 +15,7 @@ def test_vm(case, private_repo, command):
             raise CommandFailure("NOOK_WG_TRAFFIC_MODE must be services or full")
         environment["NOOK_WG_TRAFFIC_MODE"] = traffic_mode
         environment["NOOK_VPN_BACKEND"] = os.environ.get("NOOK_VPN_BACKEND") or "wg"
+    environment.update(case.env)
     for tool in ("qemu-system-x86_64", "qemu-img", "genisoimage", "curl", "ssh", "ssh-keygen", "openssl"):
         if not shutil.which(tool):
             raise CommandFailure(f"required VM tool missing: {tool}")

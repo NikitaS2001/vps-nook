@@ -62,7 +62,7 @@ if sys.argv[3] == os.environ.get('FAIL_STAGE'):
 
 
 @pytest.mark.parametrize("option,stages", [(None, ["quick"]), ("--e2e", ["quick", "qemu"]),
-                                           ("--release", ["quick", "qemu", "lifecycle", "release and not quick"])])
+                                           ("--release", ["quick", "qemu", "extension", "lifecycle", "release and not quick"])])
 def test_wrapper_selection(wrapper, option, stages):
     import ast
     entry, env = wrapper
@@ -73,7 +73,7 @@ def test_wrapper_selection(wrapper, option, stages):
     assert calls == [["-x", "-m", stage] for stage in stages]
 
 
-@pytest.mark.parametrize("stage", ["quick", "qemu", "lifecycle", "release and not quick"])
+@pytest.mark.parametrize("stage", ["quick", "qemu", "extension", "lifecycle", "release and not quick"])
 def test_wrapper_failure(wrapper, stage):
     entry, env = wrapper
     result = subprocess.run(["bash", str(entry), "--release"], env={**env, "FAIL_STAGE": stage},
@@ -101,7 +101,8 @@ def test_bootstrap_help(source_root, tmp_path):
     assert not result.stderr and not (tmp_path / ".venv").exists()
 
 
-@pytest.mark.parametrize("mutation", ["missing", "duplicate", "renamed", "vm"])
+@pytest.mark.parametrize("mutation", ["missing", "duplicate", "renamed", "vm", "extension-missing",
+                                     "extension-in-core", "extension-core-marker", "extension-disabled"])
 def test_registry_rejects_loss(source_root, mutation):
     from dataclasses import replace
     contracts, vms = CONTRACTS, VMS
@@ -111,6 +112,16 @@ def test_registry_rejects_loss(source_root, mutation):
         contracts = (*contracts, contracts[0])
     elif mutation == "renamed":
         contracts = (replace(contracts[0], argv=("bash", "tests/validation/renamed.sh")), *contracts[1:])
+    elif mutation == "extension-missing":
+        vms = tuple(case for case in vms if case.id != "extension-vaultwarden")
+    elif mutation == "extension-in-core":
+        vms = tuple(replace(case, argv=(*case.argv, "--vaultwarden-test")) if case.id == "qemu-services" else case
+                    for case in vms)
+    elif mutation == "extension-core-marker":
+        vms = tuple(replace(case, marks=("qemu",)) if case.id == "extension-vaultwarden" else case for case in vms)
+    elif mutation == "extension-disabled":
+        vms = tuple(replace(case, argv=tuple(arg for arg in case.argv if arg != "--vaultwarden-test"))
+                    if case.id == "extension-vaultwarden" else case for case in vms)
     else:
         vms = vms[:-1]
     with pytest.raises(ValueError):
@@ -605,16 +616,6 @@ def test_provenance(command, tmp_path):
     assert "FAKE-PROVENANCE-SECRET" not in result.stdout + result.stderr + report
 
 
-def test_vm_gate_flags_are_preserved():
-    gates = {case.id: set(case.argv[2:]) for case in VMS}
-    assert gates["qemu-services"] == {"--client-test", "--idempotency-test", "--reboot-test",
-                                       "--bootstrap-timeout-test", "--stopped-container-test", "--invalid-caddy-test",
-                                       "--vaultwarden-test"}
-    assert gates["remote-ssh"] == {"--ssh-rollback-test", "--ssh-cutover-test", "--reboot-test",
-                                   "--ufw-backend-failure-test"}
-    assert gates["lifecycle-upgrade-restore"] == set()
-
-
 @pytest.fixture
 def vpn_dispatch(monkeypatch, tmp_path):
     import tests.e2e.test_vm as vm
@@ -679,7 +680,7 @@ def test_vpn_dispatch_rejects_invalid_before_preparation(vpn_dispatch, monkeypat
     vm.os.access.assert_not_called()
 
 
-@pytest.mark.parametrize("case", [case for case in VMS if case.id != "qemu-services"], ids=lambda case: case.id)
+@pytest.mark.parametrize("case", [case for case in VMS if case.id != "qemu-services" and not case.env], ids=lambda case: case.id)
 def test_vpn_dispatch_other_vm_defaults_unchanged(vpn_dispatch, monkeypatch, case):
     vm, command, root = vpn_dispatch
     monkeypatch.setenv("NOOK_WG_TRAFFIC_MODE", "full")

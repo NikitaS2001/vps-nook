@@ -9,6 +9,7 @@ class Case:
     marks: tuple[str, ...]
     argv: tuple[str, ...]
     timeout: int = 900
+    env: tuple[tuple[str, str], ...] = ()
 
 CONTRACTS = (
     Case('ansible-runtime', ('quick',), ("bash", "tests/validation/ansible-runtime.sh")),
@@ -36,7 +37,10 @@ CONTRACTS = (
 VMS = (
     Case("qemu-services", ("qemu",), ("bash", "tests/e2e/qemu-install.sh",
          "--client-test", "--idempotency-test", "--reboot-test", "--bootstrap-timeout-test",
-         "--stopped-container-test", "--invalid-caddy-test", "--vaultwarden-test"), 4200),
+         "--stopped-container-test", "--invalid-caddy-test"), 4200),
+    Case("extension-vaultwarden", ("extension",), ("bash", "tests/e2e/qemu-install.sh",
+         "--client-test", "--idempotency-test", "--reboot-test", "--vaultwarden-test"), 4200,
+         (("NOOK_VPN_BACKEND", "wg"), ("NOOK_WG_TRAFFIC_MODE", "services"))),
     Case("lifecycle-upgrade-restore", ("lifecycle",), ("bash", "tests/e2e/lifecycle-qemu.sh"), 4800),
     Case("remote-ssh", ("remote",), ("bash", "tests/e2e/qemu-remote-install.sh",
          "--ssh-rollback-test", "--ssh-cutover-test", "--reboot-test", "--ufw-backend-failure-test"), 4200),
@@ -49,6 +53,21 @@ FRESH_IMAGES = {
     "ubuntu": ("https://cloud-images.ubuntu.com/noble/20260926/noble-server-cloudimg-amd64.img",
                "6a81c37564db9b1ee84e141922625e1d7c5b389b99bb3c572e0243607d5bb4d2", "ubuntu", "963"),
 }
+VMS += tuple(
+    Case(f"fresh-{os_id}-{backend}-{policy}", ("qemu",),
+         ("bash", "tests/e2e/qemu-install.sh", "--client-test", "--idempotency-test", "--reboot-test"), 4200,
+         (("QEMU_IMAGE", image), ("QEMU_IMAGE_SHA256", checksum), ("QEMU_USER", user),
+          ("QEMU_RAM_MIB", ram if backend == "awg" else "2048"),
+          ("NOOK_VPN_BACKEND", backend), ("NOOK_WG_TRAFFIC_MODE", policy)))
+    for os_id, (image, checksum, user, ram) in FRESH_IMAGES.items()
+    for backend in ("wg", "awg") for policy in ("services", "full")
+)
+
+VMS += tuple(
+    Case(f"controller-{os_id}-awg", ("remote",), ("bash", "tests/e2e/qemu-remote-install.sh"), 4200,
+         (("QEMU_IMAGE", image), ("QEMU_IMAGE_SHA256", checksum), ("NOOK_VPN_BACKEND", "awg")))
+    for os_id, (image, checksum, _, _) in FRESH_IMAGES.items()
+)
 
 # Historical boundaries are independent of registration so deleting a script
 # together with its entry still fails validation.
@@ -94,14 +113,26 @@ NATIVE = {
 
 def validate_registry(root: Path, contracts=CONTRACTS, vms=VMS):
     cases = (*contracts, *vms)
+    required_vms = {'qemu-services', 'extension-vaultwarden', 'remote-ssh', 'lifecycle-upgrade-restore',
+                    'controller-debian-awg', 'controller-ubuntu-awg'} | {
+        f'fresh-{os_id}-{backend}-{policy}'
+        for os_id in ('debian', 'ubuntu') for backend in ('wg', 'awg') for policy in ('services', 'full')
+    }
+    if not required_vms <= {case.id for case in vms}:
+        raise ValueError("required stock VM matrix is incomplete")
     ids = [case.id for case in cases]
     if len(ids) != len(set(ids)):
         raise ValueError("duplicate scenario ID")
+    extension = next(case for case in vms if case.id == "extension-vaultwarden")
+    if extension.marks != ("extension",) or "--vaultwarden-test" not in extension.argv:
+        raise ValueError("Vaultwarden requires an independent extension scenario")
+    if any("--vaultwarden-test" in case.argv for case in vms if "qemu" in case.marks):
+        raise ValueError("Core QEMU scenarios must not install optional recipes")
     registered = [case.argv[1] for case in contracts if case.argv[1].startswith("tests/validation/")]
     present = {str(path.relative_to(root)) for path in (root / "tests/validation").glob("*.sh")}
     if set(registered) != present or len(registered) != len(set(registered)):
         raise ValueError("Bash contract registration is incomplete or duplicated")
-    if {case.marks for case in vms} != {("qemu",), ("lifecycle",), ("remote",)}:
+    if {case.marks for case in vms} != {("qemu",), ("extension",), ("lifecycle",), ("remote",)}:
         raise ValueError("required VM scenario is missing")
     for case in cases:
         if not (root / case.argv[1]).is_file():

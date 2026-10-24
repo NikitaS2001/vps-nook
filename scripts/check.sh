@@ -5,7 +5,7 @@ umask 077
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 readonly ROOT_DIR
 usage() {
-    printf 'Usage: %s [--e2e|--release]\nRun quick checks; --e2e adds QEMU; --release adds QEMU, lifecycle and release contracts.\n' "${0##*/}"
+    printf 'Usage: %s [--e2e|--release]\nRun quick checks. --e2e adds core QEMU.\n--release adds core QEMU, extensions, lifecycle and release contracts.\n' "${0##*/}"
 }
 [[ $# -le 1 ]] || { usage >&2; exit 2; }
 mode=quick
@@ -37,6 +37,7 @@ if [[ ${mode} != quick ]]; then
     run_stage qemu qemu
 fi
 if [[ ${mode} == release ]]; then
+    run_stage extension extension
     run_stage lifecycle lifecycle
     run_stage release 'release and not quick'
 fi

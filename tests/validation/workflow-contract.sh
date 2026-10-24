@@ -61,8 +61,8 @@ ci = documents["ci.yml"]
 if ci.get("permissions") != {"contents": "read"}:
     sys.exit("workflow-contract: ci.yml permissions are not contents: read")
 ci_jobs = ci["jobs"]
-if set(ci_jobs) != {"static", "qemu"}:
-    sys.exit("workflow-contract: ci.yml must contain only static and qemu jobs")
+if not {"static", "qemu", "extensions", "fresh-vpn"} <= set(ci_jobs):
+    sys.exit("workflow-contract: CI lacks independent core or extension gates")
 static_runs = [step.get("run") for step in ci_jobs["static"].get("steps", [])]
 if static_runs.count("scripts/bootstrap.sh") != 1 or static_runs.count("scripts/check.sh") != 1:
     sys.exit("workflow-contract: CI static job does not use both contributor entrypoints exactly once")
@@ -82,8 +82,8 @@ if "nightly.yml" in present:
 if weekly.get("permissions") != {"contents": "read"}:
     sys.exit("workflow-contract: weekly.yml permissions are not contents: read")
 weekly_jobs = weekly["jobs"]
-if set(weekly_jobs) != {"qemu", "lifecycle"}:
-    sys.exit("workflow-contract: weekly.yml lacks QEMU or lifecycle jobs")
+if not {"qemu", "extensions", "lifecycle", "fresh-vpn"} <= set(weekly_jobs):
+    sys.exit("workflow-contract: Weekly lacks core, extension or lifecycle gates")
 matrix = weekly_jobs["qemu"].get("strategy", {}).get("matrix", {})
 includes = matrix.get("include", [])
 if {row.get("os") for row in includes} != {"debian-12", "ubuntu-24.04"}:
@@ -114,10 +114,27 @@ for name, jobs in (("ci", ci_jobs), ("weekly", weekly_jobs)):
         if job_name == "qemu":
             if job.get("timeout-minutes") != 80:
                 sys.exit("workflow-contract: QEMU needs 80 minutes including cleanup/reporting")
-            if sum(step.get("run") == ".venv/bin/pytest -m qemu --junitxml=reports/qemu.xml" for step in steps) != 1:
+            if sum(step.get("run") == ".venv/bin/pytest -m qemu -k qemu-services --junitxml=reports/qemu.xml" for step in steps) != 1:
                 sys.exit("workflow-contract: QEMU must use the pytest adapter")
-if ci_jobs["qemu"].get("needs") != "static":
-    sys.exit("workflow-contract: QEMU must follow quick checks")
+        if job_name == "extensions":
+            includes = job.get("strategy", {}).get("matrix", {}).get("include", [])
+            if {row.get("os") for row in includes} != {"debian-12", "ubuntu-24.04"}:
+                sys.exit("workflow-contract: extension platform coverage is incomplete")
+            commands = [shlex.split(step.get("run", "")) for step in steps]
+            pytest_commands = [command for command in commands if command and command[0] == ".venv/bin/pytest"]
+            if len(pytest_commands) != 1 or pytest_commands[0][1:3] != ["-m", "extension"]:
+                sys.exit("workflow-contract: extensions must select their independent pytest group")
+            if job.get("continue-on-error") or any(step.get("continue-on-error") for step in steps):
+                sys.exit("workflow-contract: extension failures must remain visible")
+        if job_name == "fresh-vpn":
+            matrix = job.get("strategy", {}).get("matrix", {})
+            if matrix != {"os": ["debian", "ubuntu"], "backend": ["wg", "awg"], "policy": ["services", "full"]}:
+                sys.exit("workflow-contract: fresh VPN matrix incomplete")
+            runs = "\n".join(step.get("run", "") for step in steps)
+            if '-k "fresh-${{ matrix.os }}-${{ matrix.backend }}-${{ matrix.policy }}"' not in runs:
+                sys.exit("workflow-contract: fresh job must select registered case")
+if any(ci_jobs[job].get("needs") != "static" for job in ("qemu", "extensions", "fresh-vpn")):
+    sys.exit("workflow-contract: core and extension jobs must depend only on quick checks")
 
 scorecard = documents["scorecard.yml"]
 analysis = scorecard["jobs"].get("analysis", {})

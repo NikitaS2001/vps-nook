@@ -27,13 +27,14 @@ Pytest runs sequentially; do not use xdist.
 | --- | --- |
 | `pytest` | Unprivileged quick tools, native fixtures and Bash contracts; no VM |
 | `pytest -k installer` | Installer cases within quick |
-| `pytest -m qemu` | Services-mode VM installation, negative scenarios, and the Vaultwarden operator smoke path |
+| `pytest -m qemu` | Core installation, recovery scenarios, and the stock WG/AWG matrix. No optional recipes |
+| `pytest -m extension` | Operator-owned Vaultwarden recipe in a separate disposable VM |
 | `pytest -m remote` | Real SSH rollback, cutover, UFW failure and reboot |
 | `pytest -m lifecycle` | Baseline, current source, rerun and encrypted restore |
 | `pytest -m release` | Local release contracts; no publication |
 | `pytest --collect-only` | All cases without commands or deployment preparation |
-| `scripts/check.sh --e2e` | Quick, then QEMU |
-| `scripts/check.sh --release` | Quick, QEMU, lifecycle, then remaining release contracts |
+| `scripts/check.sh --e2e` | Quick, then core QEMU |
+| `scripts/check.sh --release` | Quick, core QEMU, extensions, lifecycle, then remaining release contracts |
 
 Explicit `-m` replaces the default quick selection. Empty selections return 5;
 invalid arguments return 4. Pytest collects failures; `check.sh` uses `-x` and
@@ -42,11 +43,15 @@ Missing prerequisites fail. Quick checks do not invoke host `sudo` or require
 passwordless sudo, including in CI. The real installer sudo/PTY scenario runs
 inside the disposable QEMU guest. See [E2E](tests/e2e/README.md) for VM
 prerequisites and scope.
-`pytest -m qemu` runs only inside disposable guests: it includes the
+`pytest -m extension` runs only inside disposable guests. It checks the
 operator-owned Vaultwarden `check → install → exact resume → installer Caddy
 activation → WireGuard trusted HTTPS` path without host `sudo`. It proves
 repository-controlled guest behavior, not provider firewall/external routing or
 Vaultwarden account, UI, login, logout, or vault-item semantics.
+
+Core QEMU checks do not install optional recipes. CI and Weekly report core
+and extension results in independent jobs. Extension failures remain failures,
+but they do not change the core job result. The release gate runs both groups.
 
 ## Isolation and diagnostics
 

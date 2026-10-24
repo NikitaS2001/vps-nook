@@ -12,6 +12,7 @@ Notable changes are recorded here. The project follows Semantic Versioning.
 - Execute the guest sudo/PTY wrapper by script path while preserving piped installer input and hidden password checks.
 - Run interrupted-first-setup checks before creating peers, preserving the initial administrator identity during bootstrap recovery.
 - Isolate client probe routes from host routes so direct controls work with strict reverse-path filtering.
+- Separate core QEMU checks from the Vaultwarden extension scenario, with independent CI results and an explicit release gate.
 - Recopy private installer source as the hardened administrator before bootstrap retry after SSH cutover.
 - Preserve the active guest resolver during WG and AWG client preparation, preventing Debian package setup from removing `systemd-resolved`.
 - Refresh the pinned Debian stock test image so AWG can authenticate its installed dependency versions without upgrading the guest.
