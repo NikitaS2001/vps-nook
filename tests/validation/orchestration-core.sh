@@ -88,6 +88,22 @@ case "${1:-}" in
                 printf 'READY\n' >"${READINESS_FIFO:?}"
                 read -r _ <"${READINESS_GATE:?}"
                 ;;
+            many-recent|stale|never)
+                if [[ "${6:-}" == latest-handshakes ]]; then
+                    case "${READINESS_SCENARIO}" in
+                        many-recent)
+                            awk -v count="${READINESS_PEER_COUNT:?}" \
+                                -v recent="${READINESS_RECENT:?}" -v old="${READINESS_OLD:?}" \
+                                'BEGIN { for (i = 1; i <= count; i++) print "peer-" i, (i == int(count / 2) ? recent : old) }'
+                            ;;
+                        stale)
+                            printf 'peer-a %s\npeer-b %s\npeer-c %s\n' \
+                                "$((READINESS_OLD - 2))" "${READINESS_OLD}" "$((READINESS_OLD - 1))"
+                            ;;
+                        never) printf 'peer-a 0\npeer-b 0\n' ;;
+                    esac
+                fi
+                ;;
             ready) ;;
             *) exit 2 ;;
         esac
@@ -104,20 +120,44 @@ case "${*: -1}" in
     *) exit 2 ;;
 esac
 SH
-chmod 0755 "${TMP}/bin/docker" "${TMP}/bin/curl"
+cat >"${TMP}/bin/date" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $# -eq 1 && "$1" == +%s ]] || exit 2
+printf '%s\n' "${READINESS_NOW:?}"
+SH
+chmod 0755 "${TMP}/bin/docker" "${TMP}/bin/curl" "${TMP}/bin/date"
 export PATH="${TMP}/bin:${PATH}"
 export READINESS_LOG="${TMP}/docker.log"
+export READINESS_NOW=2000000000 READINESS_PEER_COUNT=100000
+READINESS_RECENT_AGE=30
+READINESS_STALE_AGE=7200
+export READINESS_RECENT="$((READINESS_NOW - READINESS_RECENT_AGE))"
+export READINESS_OLD="$((READINESS_NOW - READINESS_STALE_AGE))"
 
 for READINESS_BACKEND in wg awg; do
     export READINESS_BACKEND
-    for READINESS_SCENARIO in missing tool-failure disappearing-readiness disappearing ready; do
+    for READINESS_SCENARIO in missing tool-failure disappearing-readiness disappearing ready many-recent stale never; do
         export READINESS_SCENARIO
         : >"${READINESS_LOG}"
         code=0
         timeout 20 bash "${ROOT}/scripts/synthetic-check.sh" >"${TMP}/synthetic.log" 2>&1 || code=$?
-        if [[ "${READINESS_SCENARIO}" == ready ]]; then
-            [[ "${code}" == 0 ]]
-            grep -Fq '[WARN]' "${TMP}/synthetic.log"
+        if [[ "${READINESS_SCENARIO}" == ready || "${READINESS_SCENARIO}" == many-recent \
+            || "${READINESS_SCENARIO}" == stale || "${READINESS_SCENARIO}" == never ]]; then
+            if [[ "${code}" != 0 ]]; then
+                printf '[FAIL] synthetic backend=%s scenario=%s expected=0 actual=%s\n' \
+                    "${READINESS_BACKEND}" "${READINESS_SCENARIO}" "${code}" >&2
+                exit 1
+            fi
+            if [[ "${READINESS_SCENARIO}" == many-recent ]]; then
+                grep -Fq '[OK] recent WireGuard handshake (<= 1h)' "${TMP}/synthetic.log"
+                if grep -Fq '[WARN]' "${TMP}/synthetic.log"; then
+                    echo 'recent synthetic handshake emitted a warning' >&2
+                    exit 1
+                fi
+            else
+                grep -Fq '[WARN]' "${TMP}/synthetic.log"
+            fi
             grep -Fq '[PASS]' "${TMP}/synthetic.log"
             grep -Fxq "exec wg-easy ${READINESS_BACKEND} show wg0 latest-handshakes" "${READINESS_LOG}"
         else

@@ -84,7 +84,13 @@ done
 echo "== WireGuard handshake freshness =="
 handshakes="$(docker exec wg-easy "${WG_EXEC}" show wg0 latest-handshakes 2>/dev/null)" || \
     fail "wg-easy ${WG_EXEC} show wg0 latest-handshakes failed"
-latest="$(printf '%s\n' "${handshakes}" | awk '{print $2}' | sort -rn | head -1)"
+latest="$(printf '%s\n' "${handshakes}" | awk '
+    NF >= 2 {
+        if (!seen || ($2 + 0) > (latest + 0)) latest = $2
+        seen = 1
+    }
+    END { if (seen) print latest }
+')"
 now="$(date +%s)"
 if [[ -n "${latest}" ]] && [[ $((now - latest)) -lt 3600 ]]; then
     echo "[OK] recent WireGuard handshake (<= 1h)"
