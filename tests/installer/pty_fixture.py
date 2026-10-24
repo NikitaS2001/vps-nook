@@ -37,7 +37,7 @@ def backend_trace(trace: str) -> BackendTrace:
     return BackendTrace(fields["backend"], {"false": False, "true": True}[fields["amnezia"]], fields["routing"])
 
 
-def create_ux(root, tmp, log, *, consumer=("bash",)):
+def create_ux(root, tmp, log, *, consumer=("bash",), consumer_script=False):
     subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(tmp / "key")], check=True, stdin=subprocess.DEVNULL,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
     key = (tmp / "key.pub").read_text().strip()
@@ -107,7 +107,9 @@ run_ansible_pull() {{
                 env.pop("NO_COLOR", None)
             # Observe terminal ioctls and raw read entry, never secret bytes.
             # The real Bash builtin and its -r/-s flags remain untouched.
-            os.execvpe("bash", ["bash", "-c", f"cat {shlex.quote(str(traced_entry))} | {shlex.join(consumer)}"], env)
+            command = (shlex.join([*consumer, str(traced_entry)]) if consumer_script else
+                       f"cat {shlex.quote(str(traced_entry))} | {shlex.join(consumer)}")
+            os.execvpe("bash", ["bash", "-c", command], env)
         exited = os.pidfd_open(pid)
         output = b""
         echo_output = b""

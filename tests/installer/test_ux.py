@@ -24,6 +24,16 @@ def test_installer_defaults(ux):
     assert fields.backend == "wg" and fields.amnezia is False and fields.routing == "services"
 
 
+def test_installer_script_consumer(source_root, tmp_path, log_dir, request):
+    request.node.user_properties.append(("private_log_directory", str(log_dir)))
+    ux = create_ux(source_root, tmp_path, log_dir / (request.node.name + ".log"),
+                   consumer=("bash", "-c", 'exec bash "$1"', "nook-script-pty"),
+                   consumer_script=True)
+    _, trace = ux.run_case("script consumer", ux.base + [("Install, edit, or cancel", "i\n")])
+    assert "applied" in trace
+    assert ux.backend_trace(trace) == pty_fixture.BackendTrace("wg", False, "services")
+
+
 @pytest.mark.parametrize("backend,selection,enabled", [("wg", "1", "false"), ("awg", "2", "true")])
 @pytest.mark.parametrize("routing,selection_mode", [("services", "1"), ("full", "2")])
 def test_installer_backend_choice(ux, backend, selection, enabled, routing, selection_mode):
