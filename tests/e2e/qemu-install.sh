@@ -228,14 +228,15 @@ WG_TRAFFIC_MODE="${NOOK_WG_TRAFFIC_MODE:-services}"
 CLIENT_GUEST_STATE="/var/lib/nook-client-${TMP_DIR##*/}"
 
 run_guest_client() {
-    local action="$1" command
-    printf -v command \
-        'sudo env WG_PASSWORD=%q WG_PORT=%q WG_TRAFFIC_MODE=%q NOOK_VPN_BACKEND=%q WG_INTERNAL_DOMAIN=%q ADGUARD_INTERNAL_DOMAIN=%q CLIENT_ACTION=%q CLIENT_STATE=%q VAULTWARDEN_INTERNAL_DOMAIN=%q bash -s' \
-        "${WG_PASS}" "${E2E_WG_PORT}" "${WG_TRAFFIC_MODE}" "${NOOK_VPN_BACKEND}" \
-        "${WG_INTERNAL_DOMAIN}" "${ADGUARD_INTERNAL_DOMAIN}" "${action}" "${CLIENT_GUEST_STATE}" \
-        "$([[ "${CLIENT_EXTENSION_READY}" == true ]] && printf '%s' "${VAULTWARDEN_INTERNAL_DOMAIN}")"
-    run_remote_stdin "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
-        "${command}" < "${SOURCE_DIR}/tests/e2e/client-in-guest.sh"
+    local action="$1"
+    {
+        printf 'set -euo pipefail\numask 077\n'
+        printf 'export WG_PASSWORD=%q WG_PORT=%q WG_TRAFFIC_MODE=%q NOOK_VPN_BACKEND=%q WG_INTERNAL_DOMAIN=%q ADGUARD_INTERNAL_DOMAIN=%q CLIENT_ACTION=%q CLIENT_STATE=%q VAULTWARDEN_INTERNAL_DOMAIN=%q\n' \
+            "${WG_PASS}" "${E2E_WG_PORT}" "${WG_TRAFFIC_MODE}" "${NOOK_VPN_BACKEND}" \
+            "${WG_INTERNAL_DOMAIN}" "${ADGUARD_INTERNAL_DOMAIN}" "${action}" "${CLIENT_GUEST_STATE}" \
+            "$([[ "${CLIENT_EXTENSION_READY}" == true ]] && printf '%s' "${VAULTWARDEN_INTERNAL_DOMAIN}")"
+        cat "${SOURCE_DIR}/tests/e2e/client-in-guest.sh"
+    } | run_remote_stdin "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" 'sudo bash -s'
 }
 
 reboot_and_await_guest() {
@@ -642,12 +643,29 @@ verify_bootstrap_secret_free \
     "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519"
 echo "[E2E] wg-easy login and secret scrub verified"
 
+if [[ "${DO_IDEMPOTENCY}" == true ]]; then
+    echo "[E2E] Exercising interrupted initial setup before creating clients..."
+    # Fresh installs copy as the cloud user. Retry source must belong to the
+    # administrator after SSH cutover, including runs without timeout injection.
+    copy_repo_to_guest "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519"
+    run_remote "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
+        'sudo docker stop wg-easy >/dev/null'
+    run_remote_stdin "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
+        'sudo python3 - /opt/vps-nook/volumes/wg-easy/wg-easy.db' \
+        <"${SOURCE_DIR}/tests/e2e/bootstrap_retry.py"
+    run_repository_installer \
+        "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" existing
+    verify_bootstrap_state "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" complete
+    verify_wg_login "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519"
+    verify_bootstrap_secret_free \
+        "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519"
+    echo "[E2E] Nonzero setup state retried to durable completion"
+fi
+
 if [[ "${DO_CLIENT_TEST}" == true ]]; then
-    if [[ "${NOOK_VPN_BACKEND}" == wg ]]; then
-        run_remote "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
-            'sudo apt-get update -qq >/dev/null && sudo apt-get install -y -qq wireguard-tools jq openssl dnsutils resolvconf >/dev/null'
-    fi
-    # AWG matching tools/module remain externally prepared; never install a fallback.
+    run_remote "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
+        "sudo /opt/vps-nook-installer/repo/tests/e2e/prepare-vpn-client.sh '${NOOK_VPN_BACKEND}'"
+    # Client preparation occurs only after production server module installation.
     CLIENT_PREPARED=true
     run_guest_client prepare
 fi
@@ -890,20 +908,6 @@ if [[ "${DO_IDEMPOTENCY}" == "true" ]]; then
         "sudo rm -rf /tmp/e2e-docker-bin /tmp/e2e-caddy-reload-count /tmp/e2e-caddy-fail-next-reload"
     unset E2E_DOCKER_PATH
     echo "[E2E] Invalid candidate preserved live state; valid recovery reloaded without recreation"
-
-    echo "[E2E] Exercising retry from a nonzero setup_step..."
-    [[ "${DO_CLIENT_TEST}" != true ]] || run_guest_client check
-    run_remote "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
-        "sudo docker stop wg-easy >/dev/null && sudo python3 -c \"import sqlite3; db=sqlite3.connect('/opt/vps-nook/volumes/wg-easy/wg-easy.db'); db.execute('DELETE FROM users_table'); db.execute('UPDATE general_table SET setup_step=2'); db.commit(); db.close()\""
-    run_repository_installer \
-        "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" existing
-    run_remote "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
-        "sudo python3 -c \"import sqlite3; db=sqlite3.connect('/opt/vps-nook/volumes/wg-easy/wg-easy.db'); rows=db.execute('SELECT setup_step FROM general_table').fetchall(); db.close(); raise SystemExit(0 if rows == [(0,)] else 1)\""
-    verify_wg_login "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519"
-    verify_bootstrap_secret_free \
-        "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519"
-    echo "[E2E] Nonzero setup state retried to durable completion"
-    [[ "${DO_CLIENT_TEST}" != true ]] || run_guest_client check
 fi
 
 if [[ "${QEMU_HOLD_FOR_EXTERNAL_CLIENT:-0}" == 1 ]]; then

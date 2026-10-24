@@ -10,6 +10,10 @@ Notable changes are recorded here. The project follows Semantic Versioning.
 - Prepare pinned AWG source through distro DKMS and exact running-kernel headers. Share preflight between the installer and the controller. Preserve rerun state. Reject unsupported kernels and unattended reboot. Reject enabled or unknown Secure Boot, module signature enforcement, or lockdown. Matching clients remain required.
 - Prevent SIGPIPE failures in the synthetic health check when many peers report handshake timestamps.
 - Execute the guest sudo/PTY wrapper by script path while preserving piped installer input and hidden password checks.
+- Run interrupted-first-setup checks before creating peers, preserving the initial administrator identity during bootstrap recovery.
+- Isolate client probe routes from host routes so direct controls work with strict reverse-path filtering.
+- Recopy private installer source as the hardened administrator before bootstrap retry after SSH cutover.
+- Preserve the active guest resolver during WG and AWG client preparation, preventing Debian package setup from removing `systemd-resolved`.
 - Refresh the pinned Debian stock test image so AWG can authenticate its installed dependency versions without upgrading the guest.
 - Organize operator-owned service recipes under `examples/<service>/`, with a complete Vaultwarden installation and lifecycle guide.
 - Pin the Vaultwarden image by tag and OCI index digest, close registration by default, and validate the recipe in the quick gate.

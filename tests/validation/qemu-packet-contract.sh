@@ -107,12 +107,19 @@ done
 done
 
 for backend in wg awg; do
-    for scenario in fresh kernel-failure response-failure wrong-peer zero-transfer; do
+    for scenario in fresh kernel-failure response-failure wrong-peer zero-transfer \
+        route-conflict rule-conflict route-query-failure route-install-failure rule-install-failure; do
         (
             export VPN_TOOL="${backend}" VPN_LINK=wireguard
             [[ "${backend}" != awg ]] || VPN_LINK=amneziawg
             export CLIENT_IPV4=10.8.0.7 CLIENT_IPV6=fd42:42:42::7 WG_DOMAIN=wg.internal CADDY_IP=10.66.0.3
+            export PROBE_ROUTE_TABLE=51822 PROBE_RULE_PRIORITY=11000
+            PROBE_ROUTE_FAMILIES=()
+            PROBE_ROUTE_RULES=()
+            ROUTING_STATE="$(mktemp -d "${TMP_DIR}/routing.XXXXXX")"
+            export ROUTING_STATE
             printf 'MTU = 1420\n' >original.conf
+            cp original.conf zt-e2e.conf
             ip() {
                 printf '%s\n' "$*" >>routes
                 if [[ "$1 $2" == 'link add' ]]; then
@@ -120,9 +127,29 @@ for backend in wg awg; do
                     [[ "${scenario}" != kernel-failure ]] || return 42
                     touch kernel-created
                 fi
+                if [[ "${2:-}" == -j ]]; then
+                    [[ "${scenario}" != route-query-failure ]] || return 73
+                    if [[ "${scenario}" == route-conflict && "$3" == route ]]; then
+                        printf '[{"table":%s}]\n' "${PROBE_ROUTE_TABLE}"
+                    elif [[ "${scenario}" == rule-conflict && "$3" == rule ]]; then
+                        printf '[{"priority":%s}]\n' "${PROBE_RULE_PRIORITY}"
+                    else
+                        printf '[]\n'
+                    fi
+                elif [[ "${2:-} ${3:-}" == 'route add' ]]; then
+                    [[ "${scenario}" != route-install-failure || "$1" != -6 ]] || return 74
+                    touch "${ROUTING_STATE}/table-${1#-}"
+                elif [[ "${2:-} ${3:-}" == 'rule add' ]]; then
+                    [[ "${scenario}" != rule-install-failure || "$1" != -6 ]] || return 75
+                    touch "${ROUTING_STATE}/rule-${1#-}-${5}"
+                elif [[ "${2:-} ${3:-}" == 'rule del' ]]; then
+                    rm "${ROUTING_STATE}/rule-${1#-}-${5}"
+                elif [[ "${2:-} ${3:-}" == 'route flush' ]]; then
+                    rm "${ROUTING_STATE}/table-${1#-}"
+                fi
             }
-            wg-quick() { [[ "${backend}" == wg && "$1" == strip ]]; }
-            awg-quick() { [[ "${backend}" == awg && "$1" == strip ]]; }
+            wg-quick() { [[ "${backend}" == wg && "$1" == strip && "$2" == /* && -f "$2" ]]; }
+            awg-quick() { [[ "${backend}" == awg && "$1" == strip && "$2" == /* && -f "$2" ]]; }
             selected_tool() {
                 case "$*" in
                     $'setconf\nzt-e2e\nstripped.conf') test -f kernel-created ;;
@@ -152,11 +179,10 @@ for backend in wg awg; do
             rm -f kernel-created routes
             result=0
             fresh_tunnel >fresh-result || result=$?
+            cleanup_probe_routing
+            [[ -z "$(find "${ROUTING_STATE}" -type f -print -quit)" ]]
             if [[ "${scenario}" == fresh ]]; then
                 [[ "${result}" == 0 ]]
-                for destination in 10.66.0.2/32 10.66.0.3/32 fd42:42:42::1/128 fd00:67:0:0::250/128; do
-                    grep -Fq "${destination}" routes
-                done
             else
                 [[ "${result}" != 0 ]]
             fi

@@ -27,6 +27,15 @@ E2E_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=tests/e2e/common.sh
 source "${E2E_DIR}/common.sh"
 
+NOOK_VPN_BACKEND="${NOOK_VPN_BACKEND:-wg}"
+WG_AMNEZIA_ENABLED=false
+case "${NOOK_VPN_BACKEND}" in
+    wg) ;;
+    awg) WG_AMNEZIA_ENABLED=true ;;
+    *) fail "NOOK_VPN_BACKEND must be wg or awg" ;;
+esac
+export NOOK_VPN_BACKEND
+
 DEFAULT_IMAGE="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
 QEMU_IMAGE="${QEMU_IMAGE:-${DEFAULT_IMAGE}}"
 INSTALL_REF="${INSTALL_REF:-feat/public-installer-v1}"
@@ -204,6 +213,7 @@ write_group_vars() {
 ---
 # Network
 wg_traffic_mode: "${NOOK_WG_TRAFFIC_MODE:-services}"
+wg_amnezia_enabled: ${WG_AMNEZIA_ENABLED}
 ssh_port: ${configured_ssh_port}
 vps_hardening_controller_ssh_port: ${QEMU_ADMIN_PORT}
 wg_port: ${E2E_WG_PORT}
@@ -524,6 +534,18 @@ if [[ "${DO_REBOOT}" == "true" ]]; then
     sleep 20
     verify_deployment "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519"
     echo "[E2E] Reboot survival verified"
+fi
+
+if [[ "${NOOK_VPN_BACKEND}" == awg ]]; then
+    run_remote_stdin "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
+        'sudo bash -s -- awg' < "${ROOT_DIR}/tests/e2e/prepare-vpn-client.sh"
+    {
+        printf 'set -euo pipefail\numask 077\n'
+        printf 'export WG_PASSWORD=%q WG_PORT=%q WG_TRAFFIC_MODE=%q NOOK_VPN_BACKEND=awg ROOT_CA=%q\n' \
+            "${WG_PASS}" "${E2E_WG_PORT}" "${NOOK_WG_TRAFFIC_MODE:-services}" \
+            /opt/vps-nook/volumes/caddy/data/caddy/pki/authorities/local/root.crt
+        cat "${ROOT_DIR}/tests/e2e/client-in-guest.sh"
+    } | run_remote_stdin "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" 'sudo bash -s'
 fi
 
 echo "[E2E] PASS: remote-mode E2E succeeded in qemu/KVM"

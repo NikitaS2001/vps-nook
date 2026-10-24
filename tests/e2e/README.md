@@ -82,38 +82,68 @@ tests/e2e/qemu-install.sh --client-test --idempotency-test
 ```
 
 `NOOK_VPN_BACKEND=wg` (default) or `awg` selects both the installer and the
-exact `wg show wg0` / `awg show wg0` readiness query. Before the first WG
-client preparation, the harness installs `wireguard-tools`, `jq`, `openssl`,
-`dnsutils`, and `resolvconf` inside the disposable guest; package setup failure
-stops before peer creation. AWG requires an externally prepared matching
-kernel module and client tools in the guest image. Client checks
-require `curl`, `jq`, `ip`, `dig`, `ping`, Python 3, and the matching `wg` /
-`wg-quick` or `awg` / `awg-quick`. The harness neither acquires modules nor
-installs a userspace fallback. Missing prerequisites fail.
+exact `wg show wg0` / `awg show wg0` readiness query.
+`tests/e2e/prepare-vpn-client.sh wg|awg` prepares matching client tools inside
+the disposable guest. Both backends install `jq`, `openssl`, and `dnsutils`.
+WG also installs `wireguard-tools`. Package failure stops before peer creation.
+Client checks require these tools:
+
+- `curl`, `jq`, `ip`, `dig`, `ping`, and Python 3.
+- The matching `wg` / `wg-quick` or `awg` / `awg-quick`.
+
+
+WG and AWG client preparation preserve an active `systemd-resolved` provider.
+They use `resolvectl`'s `resolvconf` compatibility entry point instead of
+installing a second resolver manager. Installing Debian `resolvconf` can remove
+`systemd-resolved` and break guest DNS before reboot.
+Preparation refuses an existing conflicting provider without changing it.
+An active service requires executable `resolvectl`.
+An indeterminate service query refuses preparation before APT or alias creation.
+Only a positively inactive systemd resolver uses the distro `resolvconf` package.
+This policy applies to client tooling inside disposable guests, not host DNS configuration.
 
 The pinned wg-easy 15.4.0 source ships amneziawg-tools v3.0.20260805.
-Prepared AWG tools must support its generated Jc/Jmin/Jmax, S1-S4, H1-H4 and
-optional I1-I5 fields. Runtime compatibility with the pinned image digest
-still requires an actual prepared guest; source inspection cannot establish it.
+Compatible client tools must support its generated Jc/Jmin/Jmax, S1-S4,
+H1-H4 and optional I1-I5 fields.
+Verify runtime compatibility with the pinned image digest on a fresh stock guest through the production role.
+Include an authenticated client handshake.
+Source inspection alone cannot establish runtime compatibility.
+
+The interrupted-first-setup fixture runs before any client exists. It refuses
+retained clients or an unexpected administrator identity. The fixture restores
+the first-user allocation state before the installer retries bootstrap. Later
+rerun and reboot checks preserve the administrator and retained peer.
+
+Before a retry, the harness recopies private source as the hardened administrator.
+It does not make cloud-user source public.
 
 The client peer is created before the first completed-state rerun or reboot.
 Its ID, original private profile and identity fingerprint remain in a private
-guest directory until final cleanup. Every boundary check compares server
-identity, peer membership and profile parameters, recreates only the client
-kernel interface, and requires a bound, CA-authenticated HTTPS response.
-That fresh interface has no prior session keys; a positive old timestamp alone
-cannot pass. DNS uses the tunnel address and routes, and both internal names
+guest directory until final cleanup.
+Every boundary check compares server identity, peer membership and profile parameters.
+Each check recreates only the client kernel interface and requires a bound, CA-authenticated HTTPS response.
+That fresh interface has no prior session keys.
+A positive old timestamp alone cannot pass.
+DNS uses the tunnel address and routes, and both internal names
 must resolve to `10.66.0.3`. Removing the interface must break bound DNS/HTTPS
 while direct dual-stack controls remain reachable.
 
 A temporary, unprivileged container reuses the already-deployed image
 without pulling or publishing ports. It provides controlled forbidden IPv4
-and IPv6 destinations outside the services allowlist. Both direct controls
-must work; both tunnel requests must fail in services mode. Allowed IPv6
-traffic to the VPN server must also work. Missing controlled IPv6 proof is a
-failure, never a skip. `full` requires IPv4 egress; public IPv6 remains a
-separately reported optional control. A full profile containing `::/0`
-requires an actual successful public IPv6 probe.
+and IPv6 destinations outside the services allowlist.
+Both direct controls must work.
+Both tunnel requests must fail in services mode.
+Allowed IPv6 traffic to the VPN server must also work.
+Missing controlled IPv6 proof is a failure, never a skip.
+
+`full` requires IPv4 egress.
+Public IPv6 remains a separately reported optional control.
+A full profile containing `::/0` requires an actual successful public IPv6 probe.
+
+Client probes use a dedicated routing table with source and output-interface
+rules. Host routes remain unchanged, so direct controls also work with strict
+reverse-path filtering. An occupied table or rule priority stops the probe.
+Cleanup removes only the rules and routes created by that probe.
 
 Service recovery subscribes to Docker events before starting a container.
 Reboot installs an owned disposable oneshot and arms an inotify serial

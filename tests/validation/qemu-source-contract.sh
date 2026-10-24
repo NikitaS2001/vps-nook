@@ -51,7 +51,7 @@ printf 'changed after snapshot\n' >"${TMP_DIR}/kept"
 # shellcheck disable=SC2016
 grep -Fq 'tar -C "${SOURCE_DIR}" -czf - .' "${ROOT_DIR}/tests/e2e/qemu-install.sh"
 # shellcheck disable=SC2016
-grep -Fq '< "${SOURCE_DIR}/tests/e2e/client-in-guest.sh"' "${ROOT_DIR}/tests/e2e/qemu-install.sh"
+grep -Fq 'cat "${SOURCE_DIR}/tests/e2e/client-in-guest.sh"' "${ROOT_DIR}/tests/e2e/qemu-install.sh"
 
 fresh_env="$("${ROOT_DIR}/tests/e2e/qemu-install.sh" --self-test-installer-env fresh)"
 for credential in \
@@ -117,7 +117,7 @@ for backend in wg awg; do
         export E2E_SOURCE_MODE=development INSTALL_REF=fixture E2E_SSH_PORT=2222 E2E_WG_PORT=51820
         export WG_TRAFFIC_MODE=services INTERNAL_DOMAIN_SUFFIX=internal
         NOOK_VPN_BACKEND="${backend}" run_repository_installer fixture 22 fixture fresh >/dev/null
-        run_remote_stdin() { cat >/dev/null; printf '%s\n' "$4" >"${TMP_DIR}/client-dispatch"; }
+        run_remote_stdin() { cat >"${TMP_DIR}/client-input"; printf '%s\n' "$4" >"${TMP_DIR}/client-dispatch"; }
         SOURCE_DIR="${ROOT_DIR}" CLIENT_GUEST_STATE=/var/lib/private-client
         CLIENT_EXTENSION_READY=false QEMU_ADMIN_PORT=2222
         NOOK_VPN_BACKEND="${backend}" run_guest_client check
@@ -130,7 +130,8 @@ import sys
 words = shlex.split(Path(sys.argv[1]).read_text())
 fields = dict(word.split("=", 1) for word in words if "=" in word)
 assert fields.get("NOOK_VPN_BACKEND") == sys.argv[2], "installer backend forwarding"
-client_words = shlex.split(Path(sys.argv[1]).with_name("client-dispatch").read_text())
+assert Path(sys.argv[1]).with_name("client-dispatch").read_text().strip() == "sudo bash -s"
+client_words = shlex.split(Path(sys.argv[1]).with_name("client-input").read_text().splitlines()[2])
 client_fields = dict(word.split("=", 1) for word in client_words if "=" in word)
 assert client_fields["NOOK_VPN_BACKEND"] == sys.argv[2]
 assert client_fields["CLIENT_ACTION"] == "check"
@@ -178,16 +179,10 @@ run_repository_installer() {
     printf 'rerun\n' >>"${TMP_DIR}/sequence"
     phase=rerun
 }
-sudo() { [[ "$1" == apt-get ]]; "$@"; }
-apt-get() {
-    printf 'apt:%s\n' "$*" >>"${TMP_DIR}/sequence"
-    [[ "$1" != "${SETUP_FAILURE}" ]] || return 42
-}
-export TMP_DIR SETUP_FAILURE
-export -f sudo apt-get
 run_remote() {
     case "$4" in
-        'sudo apt-get '*) bash -c "$4" ;;
+        'sudo /opt/vps-nook-installer/repo/tests/e2e/prepare-vpn-client.sh '*)
+            [[ -z "${SETUP_FAILURE}" ]] || return 42 ;;
         *) [[ "${phase}" != initial ]] || return 43; echo same-container ;;
     esac
 }
@@ -206,21 +201,19 @@ verify_bootstrap_secret_free() { :; }
 adapters = adapters.replace("phase=rerun", 'printf rerun >"${TMP_DIR}/boundary"')
 adapters = adapters.replace('checked="${phase}"', 'checked="${phase}"; [[ ! -f "${TMP_DIR}/boundary" ]] || checked="$(<"${TMP_DIR}/boundary")"')
 program = "\n".join((adapters, prepare, reboot, rerun, '[[ "${peer}" == retained && "${checked}" == rerun ]]'))
-for backend, failure in (("wg", ""), ("awg", ""), ("wg", "update"), ("wg", "install")):
+for backend, failure in (("wg", ""), ("awg", ""), ("wg", "preparation"), ("awg", "preparation")):
     with tempfile.TemporaryDirectory(dir=private) as directory:
         result = subprocess.run(["bash", "-c", program, "lifecycle-contract", directory, backend, failure],
                                 capture_output=True, timeout=10)
-        sequence = (Path(directory) / "sequence").read_text().splitlines()
-        packages = ["wireguard-tools", "jq", "openssl", "dnsutils", "resolvconf"]
-        setup = ["apt:update -qq", "apt:install -y -qq " + " ".join(packages)]
+        sequence_path = Path(directory) / "sequence"
+        sequence = sequence_path.read_text().splitlines() if sequence_path.exists() else []
         lifecycle = ["client:prepare", "client:check", "reboot", "client:check", "client:check", "rerun", "client:check"]
         if failure:
             assert result.returncode == 42, (failure, result.returncode)
-            assert sequence == setup[:1 if failure == "update" else 2], "setup failure reached peer creation"
+            assert not sequence, "preparation failure reached peer creation"
         else:
             assert result.returncode == 0, "peer must precede and survive actual reboot/rerun call sites"
-            assert sequence == (setup if backend == "wg" else []) + lifecycle, \
-                ("WG tools must be prepared before peer creation; AWG must remain externally prepared", backend, sequence)
+            assert sequence == lifecycle, "retained peer lifecycle changed"
         print(f"client-preparation: backend={backend} failure={failure or 'none'} exit={result.returncode}")
 print("retained-lifecycle: actual preparation/reboot/rerun ordering passed")
 PYLIFECYCLE

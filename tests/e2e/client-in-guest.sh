@@ -18,6 +18,8 @@ WG_PORT="${WG_PORT:-51820}"
 ROOT_CA="${ROOT_CA:-/opt/vps-nook-installer/repo/fetched_certs/localhost/root.crt}"
 WG_TRAFFIC_MODE="${WG_TRAFFIC_MODE:-services}"
 CLIENT_NAME="e2e-retained-client"
+PROBE_ROUTE_TABLE=51822
+PROBE_RULE_PRIORITY=11000
 UI_PORT="${UI_PORT:-51821}"
 WG_DOMAIN="${WG_INTERNAL_DOMAIN:-wg.internal}"
 CADDY_IP="${CADDY_IP:-10.66.0.3}"
@@ -52,10 +54,74 @@ cd "${CLIENT_STATE}"
 TUNNEL_CREATED=false
 CONTROL_CONTAINER=""
 CONTROL_PID_OWNED=""
+PROBE_ROUTE_FAMILIES=()
+PROBE_ROUTE_RULES=()
+
+probe_routing_rule() {
+    local operation="$1" family="$2" selector="$3" address
+    if [[ "${selector}" == source ]]; then
+        if [[ "${family}" == 4 ]]; then address="${CLIENT_IPV4}/32"; else address="${CLIENT_IPV6}/128"; fi
+        ip "-${family}" rule "${operation}" priority "${PROBE_RULE_PRIORITY}" \
+            from "${address}" lookup "${PROBE_ROUTE_TABLE}"
+    else
+        ip "-${family}" rule "${operation}" priority "$((PROBE_RULE_PRIORITY + 1))" \
+            oif zt-e2e lookup "${PROBE_ROUTE_TABLE}"
+    fi
+}
+
+configure_probe_routing() {
+    local family rules routes selector
+    for family in 4 6; do
+        rules="$(ip "-${family}" -j rule show)" || return
+        routes="$(ip "-${family}" -j route show table all)" || return
+        python3 - "${PROBE_ROUTE_TABLE}" "${PROBE_RULE_PRIORITY}" "${rules}" "${routes}" <<'PY' || return
+import json
+import sys
+
+table, priority = map(int, sys.argv[1:3])
+rules, routes = map(json.loads, sys.argv[3:5])
+if any(str(row.get("table")) == str(table) for row in rules + routes):
+    raise SystemExit("Probe routing table is already in use")
+if any(row.get("priority") in (priority, priority + 1) for row in rules):
+    raise SystemExit("Probe routing priority is already in use")
+PY
+    done
+    # Keep host routes intact. Strict reverse-path filtering must accept direct
+    # controls while source- and interface-bound probes use the tunnel.
+    for family in 4 6; do
+        ip "-${family}" route add default dev zt-e2e table "${PROBE_ROUTE_TABLE}" || return
+        PROBE_ROUTE_FAMILIES+=("${family}")
+        for selector in source interface; do
+            probe_routing_rule add "${family}" "${selector}" || return
+            PROBE_ROUTE_RULES+=("${family}:${selector}")
+        done
+    done
+}
+
+cleanup_probe_routing() {
+    local entry family status=0
+    local remaining_rules=() remaining_families=()
+    for entry in "${PROBE_ROUTE_RULES[@]}"; do
+        if ! probe_routing_rule del "${entry%%:*}" "${entry#*:}"; then
+            remaining_rules+=("${entry}")
+            status=1
+        fi
+    done
+    PROBE_ROUTE_RULES=("${remaining_rules[@]}")
+    for family in "${PROBE_ROUTE_FAMILIES[@]}"; do
+        if ! ip "-${family}" route flush table "${PROBE_ROUTE_TABLE}"; then
+            remaining_families+=("${family}")
+            status=1
+        fi
+    done
+    PROBE_ROUTE_FAMILIES=("${remaining_families[@]}")
+    return "${status}"
+}
 
 cleanup() {
     local status=$?
     trap - EXIT
+    cleanup_probe_routing || status=1
     if [[ "${TUNNEL_CREATED}" == true ]]; then
         ip link delete zt-e2e || status=1
     fi
@@ -288,7 +354,7 @@ fresh_tunnel() {
     # profile: ip-link failure cannot invoke a userspace implementation.
     ip link add zt-e2e type "${VPN_LINK}" || return
     TUNNEL_CREATED=true
-    "${VPN_TOOL}-quick" strip zt-e2e.conf >stripped.conf || return
+    "${VPN_TOOL}-quick" strip "${PWD}/zt-e2e.conf" >stripped.conf || return
     "${VPN_TOOL}" setconf zt-e2e stripped.conf || return
     ip address add "${CLIENT_IPV4}/32" dev zt-e2e || return
     ip -6 address add "${CLIENT_IPV6}/128" dev zt-e2e nodad || return
@@ -296,11 +362,7 @@ fresh_tunnel() {
     mtu="$(awk -F ' = ' '$1 == "MTU" {print $2}' original.conf)"
     [[ "${mtu}" =~ ^[0-9]+$ ]] && ((mtu >= 1280 && mtu <= 65535)) || return 1
     ip link set zt-e2e mtu "${mtu}" up || return
-    for address in 10.66.0.2 "${CADDY_IP}" 10.66.0.250 1.1.1.1; do
-        ip route replace "${address}/32" dev zt-e2e || return
-    done
-    ip -6 route replace fd42:42:42::1/128 dev zt-e2e || return
-    ip -6 route replace fd00:67:0:0::250/128 dev zt-e2e || return
+    configure_probe_routing || return
     # The bound socket subscribes before sending and awaits its exact trusted
     # response. Success proves a post-creation handshake without timestamp polling.
     service_https "${WG_DOMAIN}" || return
@@ -405,6 +467,7 @@ if [[ -n "${VAULTWARDEN_INTERNAL_DOMAIN}" ]]; then
     service_https "${VAULTWARDEN_INTERNAL_DOMAIN}"
 fi
 
+cleanup_probe_routing
 ip link delete zt-e2e
 TUNNEL_CREATED=false
 for domain in "${WG_DOMAIN}" "${ADGUARD_INTERNAL_DOMAIN:-adguard.internal}"; do
