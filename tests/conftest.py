@@ -10,6 +10,7 @@ from urllib.request import Request, urlopen
 
 import pytest
 
+from tests.qemu_owner import identity
 from tests.registry import validate_registry
 from tests.support import CommandFailure, prepare_examples, run, short_state, snapshot
 
@@ -42,7 +43,10 @@ def pytest_sessionfinish(session, exitstatus):
 def remove_private_test_state(tmp_path):
     # pytest normally retains failed tmp_path directories, including fixture keys.
     # This suite keeps only the separate private diagnostics directory.
+    captured = identity(tmp_path)
     yield
+    if tmp_path.resolve() != tmp_path or identity(tmp_path) != captured:
+        pytest.fail("private test directory ownership changed; state retained", pytrace=False)
     shutil.rmtree(tmp_path)
     if tmp_path.exists():
         pytest.fail("private test state cleanup incomplete", pytrace=False)
@@ -100,7 +104,7 @@ def release_status_fixture(tmp_path_factory):
 def command(request, log_dir, tmp_path):
     registry = tmp_path / "process-registry"
     registry.mkdir(mode=0o700)
-    with short_state() as temporary:
+    with short_state(registry) as temporary:
         counter = 0
 
         def execute(argv, *, cwd, timeout=900, env=None, expected=0):

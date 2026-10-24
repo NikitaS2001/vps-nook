@@ -10,6 +10,7 @@ Notable changes are recorded here. The project follows Semantic Versioning.
 - Require an operator-prepared matching AWG module and client; distinguish early metadata checks from loading and interoperability, with no automatic module build/install/download, userspace fallback, or silent peer migration.
 - Prevent SIGPIPE failures in the synthetic health check when many peers report handshake timestamps.
 - Execute the guest sudo/PTY wrapper by script path while preserving piped installer input and hidden password checks.
+- Refresh the pinned Debian stock test image so AWG can authenticate its installed dependency versions without upgrading the guest.
 - Organize operator-owned service recipes under `examples/<service>/`, with a complete Vaultwarden installation and lifecycle guide.
 - Pin the Vaultwarden image by tag and OCI index digest, close registration by default, and validate the recipe in the quick gate.
 - Clarify shared Compose override merging and the extension backup allowlist.

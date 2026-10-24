@@ -432,14 +432,30 @@ verify_traffic_mode() {
 # default user-data is generated granting that key; otherwise the file is used
 # verbatim. Remaining args are hostfwd entries such as
 #   hostfwd=tcp:127.0.0.1:2223-:22
-# Sets the global QEMU_PID (used by the caller's cleanup trap) and writes the
+qemu_owner_cli() {
+    local owner_dir
+    owner_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+    python3 "${owner_dir}/../qemu_owner.py" "$@"
+}
+
+init_owned_qemu() {
+    qemu_owner_cli init "$@"
+}
+
+cleanup_owned_qemu() {
+    qemu_owner_cli cleanup "$@"
+}
+
+# Sets QEMU_PID, QEMU_START_TICKS and QEMU_PIDFILE for the caller's cleanup trap.
+# Writes the
 # serial console to <tmp_dir>/serial.log.
 boot_vm() {
     local tmp_dir="$1" image="$2" disk_gb="$3" mem_mb="$4" smp="$5"
     local instance_id="$6" hostname="$7" user_data_file="$8"
     shift 8
     local hostfwd netdev="user,id=n0"
-    local runner_pidfile="${tmp_dir}/qemu.pid"
+    local runner_pidfile="${tmp_dir}/qemu.pid" owned_identity
+    init_owned_qemu "${tmp_dir}"
 
     echo "[E2E] Preparing the cloud image..."
     if [[ "${image}" == http* ]]; then
@@ -476,16 +492,13 @@ SEEDEOF
     echo "[E2E] Booting the VM (KVM)..."
     if [[ -n ${E2E_PROCESS_REGISTRY:-} ]]; then
         runner_pidfile="$(mktemp "${E2E_PROCESS_REGISTRY}/qemu.XXXXXX.pid")"
-        python3 - "${runner_pidfile}" "${tmp_dir}" <<'PYINTENT'
-import os
-from pathlib import Path
-import sys
-pidfile, directory = map(Path, sys.argv[1:])
-started = int(float(Path("/proc/uptime").read_text().split()[0]) * os.sysconf("SC_CLK_TCK"))
-intent = pidfile.with_suffix(".intent")
-intent.write_text(f"{pidfile}\n{started}\n{directory}\n")
-intent.chmod(0o600)
-PYINTENT
+    fi
+    # Capture selected pidfile/dir/exe before daemonization, including cancellation.
+    # shellcheck disable=SC2034  # exposed to direct/manual cleanup callers
+    QEMU_PIDFILE="${runner_pidfile}"
+    qemu_owner_cli prepare "${tmp_dir}" --executable "$(command -v qemu-system-x86_64)" --pidfile "${QEMU_PIDFILE}"
+    if [[ -n ${E2E_PROCESS_REGISTRY:-} ]]; then
+        qemu_owner_cli intent "${tmp_dir}" --record "${runner_pidfile%.pid}.intent"
     fi
     qemu-system-x86_64 -enable-kvm -m "${mem_mb}" -smp "${smp}" \
         -drive file="${tmp_dir}/disk.qcow2",if=virtio,format=qcow2 \
@@ -497,41 +510,13 @@ PYINTENT
     if [[ ${runner_pidfile} != "${tmp_dir}/qemu.pid" ]]; then
         cp -- "${runner_pidfile}" "${tmp_dir}/qemu.pid"
     fi
+    owned_identity="$(qemu_owner_cli publish "${tmp_dir}")" || fail "QEMU startup ownership was not captured"
+    # shellcheck disable=SC2034  # consumed by caller cleanup/diagnostics
+    read -r QEMU_PID QEMU_START_TICKS <<<"${owned_identity}"
     # Publish ownership outside VM state before any delay/cleanup can remove it.
     if [[ -n ${E2E_PROCESS_REGISTRY:-} && -s ${tmp_dir}/qemu.pid ]]; then
-        python3 - "${E2E_PROCESS_REGISTRY}" "${tmp_dir}" <<'PYREG'
-import os
-from pathlib import Path
-import sys
-import tempfile
-
-registry, directory = map(Path, sys.argv[1:])
-pid = int((directory / "qemu.pid").read_text())
-started = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
-record = registry / f"{pid}.record"
-fd, temporary = tempfile.mkstemp(prefix=f".{pid}.record.", dir=registry)
-published = False
-try:
-    os.fchmod(fd, 0o600)
-    with os.fdopen(fd, "w") as stream:
-        stream.write(f"{pid}\n{started}\n{directory}\n")
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.link(temporary, record)
-    published = True
-    os.unlink(temporary)
-    directory_fd = os.open(registry, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(directory_fd)
-    finally:
-        os.close(directory_fd)
-finally:
-    if not published:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
-PYREG
+        qemu_owner_cli record "${tmp_dir}" --record "${runner_pidfile%.pid}.record" \
+            --pid "${QEMU_PID}" --started "${QEMU_START_TICKS}"
     fi
     sleep 2
     if [[ ! -s "${tmp_dir}/qemu.pid" ]]; then
@@ -539,6 +524,5 @@ PYREG
         tail -30 "${tmp_dir}/serial.log" 2>/dev/null || true
         fail "qemu did not start"
     fi
-    # shellcheck disable=SC2034  # consumed by the caller's cleanup trap
-    QEMU_PID="$(cat "${tmp_dir}/qemu.pid")"
+    # Ownership globals were captured before any delay, not reread from a stale pidfile.
 }

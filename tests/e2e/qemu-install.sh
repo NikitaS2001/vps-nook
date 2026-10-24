@@ -23,6 +23,7 @@
 #   E2E_KEEP_STATE_ON_FAILURE  keep the VM and QEMU_STATE_DIR after failure
 #                              for diagnostics (default 0; requires QEMU_STATE_DIR)
 set -euo pipefail
+umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT_DIR}"
@@ -165,6 +166,7 @@ done
 command -v ssh >/dev/null || fail "required tool not found: ssh"
 
 if [[ -n "${QEMU_STATE_DIR:-}" ]]; then
+    qemu_owner_cli check-path "${QEMU_STATE_DIR}"
     mkdir -p -- "${QEMU_STATE_DIR}"
     chmod 0700 "${QEMU_STATE_DIR}"
     TMP_DIR="$(cd -- "${QEMU_STATE_DIR}" && pwd -P)"
@@ -176,12 +178,19 @@ fi
 STATE_SENTINEL="${TMP_DIR}/.qemu-install-state"
 printf 'qemu-install-v1\n' >"${STATE_SENTINEL}"
 QEMU_PID=""
+init_owned_qemu "${TMP_DIR}"
 CLIENT_PREPARED=false
 CLIENT_EXTENSION_READY=false
 SERIAL_OBSERVER_PID=""
 BOOT_FIXTURE_ARMED=false
 cleanup() {
     local exit_status=$?
+    # The observer is an unreaped direct child (coproc exec), not a daemon PID.
+    if [[ -n "${SERIAL_OBSERVER_PID}" ]]; then
+        kill "${SERIAL_OBSERVER_PID}" 2>/dev/null || true
+        wait "${SERIAL_OBSERVER_PID}" 2>/dev/null || true
+        SERIAL_OBSERVER_PID=""
+    fi
     if [[ "${E2E_KEEP_STATE_ON_FAILURE:-0}" == 1 && ${exit_status} -ne 0 ]]; then
         [[ -n "${QEMU_STATE_DIR:-}" ]] || \
             fail "E2E_KEEP_STATE_ON_FAILURE requires QEMU_STATE_DIR"
@@ -191,22 +200,15 @@ cleanup() {
     if [[ "${CLIENT_PREPARED}" == true ]]; then
         run_guest_client cleanup || exit_status=1
     fi
-    if [[ -n "${SERIAL_OBSERVER_PID}" ]]; then
-        kill "${SERIAL_OBSERVER_PID}" 2>/dev/null || true
-        wait "${SERIAL_OBSERVER_PID}" 2>/dev/null || true
-    fi
     if [[ "${BOOT_FIXTURE_ARMED}" == true ]]; then
         run_remote "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
             "sudo systemctl disable nook-e2e-ready.service && sudo rm -f /etc/systemd/system/nook-e2e-ready.service && sudo rm -rf '${BOOT_GUEST_STATE}' && sudo systemctl daemon-reload" \
             || exit_status=1
     fi
-    if [[ -n "${QEMU_PID}" ]] && kill -0 "${QEMU_PID}" >/dev/null 2>&1; then
-        kill "${QEMU_PID}" >/dev/null 2>&1 || true
-        sleep 2
+    if ! cleanup_owned_qemu "${TMP_DIR}" --sentinel "${STATE_SENTINEL}" qemu-install-v1; then
+        echo "[CLEANUP] QEMU state retained: ownership/exit not confirmed" >&2
+        exit_status=1
     fi
-    [[ -f "${STATE_SENTINEL}" && "$(<"${STATE_SENTINEL}")" == qemu-install-v1 ]] || \
-        fail "refusing to remove an unrecognized QEMU state directory"
-    rm -rf -- "${TMP_DIR}"
     return "${exit_status}"
 }
 trap cleanup EXIT
@@ -273,7 +275,7 @@ UNIT
     # inotify is armed and acknowledged before reboot. The guest's nonce is
     # emitted only after new-boot service health, never by a host timer.
     coproc BOOT_EVENTS {
-        python3 - "${TMP_DIR}/serial.log" "${nonce}" <<'PYBOOT'
+        exec python3 - "${TMP_DIR}/serial.log" "${nonce}" <<'PYBOOT'
 import ctypes
 import os
 import selectors

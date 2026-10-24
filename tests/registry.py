@@ -42,6 +42,14 @@ VMS = (
          "--ssh-rollback-test", "--ssh-cutover-test", "--reboot-test", "--ufw-backend-failure-test"), 4200),
 )
 
+# Fresh stock images; hashes verified before the guest starts.
+FRESH_IMAGES = {
+    "debian": ("https://cloud.debian.org/images/cloud/bookworm/daily/20261023-2640/debian-12-genericcloud-amd64-daily-20261023-2640.qcow2",
+               "dd7898c00b7ff1950d7bc1c45eb06dda626a42414de06fbb23934dfde39dc58d", "debian", "952"),
+    "ubuntu": ("https://cloud-images.ubuntu.com/noble/20260926/noble-server-cloudimg-amd64.img",
+               "6a81c37564db9b1ee84e141922625e1d7c5b389b99bb3c572e0243607d5bb4d2", "ubuntu", "963"),
+}
+
 # Historical boundaries are independent of registration so deleting a script
 # together with its entry still fails validation.
 HISTORICAL_CONTRACTS = frozenset({

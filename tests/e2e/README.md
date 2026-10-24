@@ -21,11 +21,12 @@ After bootstrapping, activate `.venv` and select one suite:
 | `pytest -m remote` | Real SSH rollback/cutover, UFW failure and reboot |
 | `pytest -m lifecycle` | Baseline/current/rerun/encrypted restore |
 
-Each command runs one platform; Ubuntu 24.04 is the default. Use image and user
-overrides for Debian. Missing KVM/tools fail. Tests use private source snapshots
-and deployment files; pytest owns cleanup. Keep-state debugging is available
-only through direct Bash harnesses. For quick checks, gate ordering and private
-logs, see [Contributing](../../CONTRIBUTING.md).
+Each command runs one platform. Ubuntu 24.04 is the default.
+Use image and user overrides for Debian. Missing KVM/tools fail.
+Tests use private source snapshots and deployment files. Pytest owns cleanup.
+
+Keep-state debugging is available only through direct Bash harnesses.
+For quick checks, gate ordering and private logs, see [Contributing](../../CONTRIBUTING.md).
 
 The examples below invoke Bash directly for targeted scenarios. Production
 signed-tag and attestation verification remain separate release contracts.
@@ -47,10 +48,12 @@ It proves hardened `sysadmin` SSH, `sudo manage.sh`, installer-owned Caddy
 activation, and Vaultwarden trusted HTTPS through the in-guest WireGuard client.
 
 Before provisioning, the harness runs the installer dialogue through a real
-`sudo` pipeline and PTY as the guest's unprivileged cloud user. Provisioning
-functions are stubbed for this dialogue check; it verifies root execution,
-completion, and hidden password input. Privileged fixture execution and cleanup
-stay inside the disposable guest. Local quick checks never invoke host `sudo`.
+`sudo` pipeline and PTY as the guest's unprivileged cloud user.
+Provisioning functions are stubbed for this dialogue check.
+The dialogue check verifies root execution, completion, and hidden password input.
+Privileged fixture execution and cleanup stay inside the disposable guest.
+Local quick checks never invoke host `sudo`.
+
 Repository-copy setup installs missing git/strace packages and probes pidfd
 before the shared fixture. Package or syscall failure stops the harness before
 repository transfer or fixture invocation; it does not imply a passing sudo/PTY
@@ -176,9 +179,17 @@ tests/e2e/external-client-qemu.sh --prepare-only --state-dir <private-dir>
 tests/e2e/external-client-qemu.sh --cleanup --state-dir <private-dir>
 ```
 
-Normal mode requires a pinned `VPS_KNOWN_HOSTS` file, private SSH key, VPS host,
-ports, and a provider environment. `--prepare-only` and `--cleanup` are mutually
-exclusive. This is manual operator evidence, not a merge requirement.
+Every mode requires these inputs:
+
+- An explicit `VPS_HOST`. There is no default target.
+- A pinned `VPS_KNOWN_HOSTS` file.
+- A private SSH key.
+- Ports and a provider environment.
+
+Cleanup requires the exact host/SSH port/user captured in private `peer.env`.
+A mismatch is rejected before remote actions and preserves state for a retry.
+`--prepare-only` and `--cleanup` are mutually exclusive.
+This is manual operator evidence, not a merge requirement.
 
 `run-public-install.sh` exercises an explicit tag or development ref against a
 fresh real VPS and accepts `--client-test` and `--reboot-test`. It requires an
@@ -200,12 +211,32 @@ The pytest QEMU gate includes repository-installer Caddy failure scenarios and
 the operator-owned Vaultwarden recipe smoke path. Its private guest state,
 `nook-pytest-logs.*` diagnostics, and sentinel cleanup remain pytest-owned.
 For direct failure diagnosis only, set `E2E_KEEP_STATE_ON_FAILURE=1` with an
-empty private `QEMU_STATE_DIR`; remove retained state after stopping the owned
-VM. Remote SSH/UFW negative cases are available through `pytest -m remote`;
-they are not part of routine CI or the `check.sh --release` sequence. Run them
-when a change touches the corresponding boundary and report the exact scenarios
-that completed. Persist logs only in a private evidence directory and scan them
-for credentials before sharing.
+empty private `QEMU_STATE_DIR`.
+The owned QEMU stays alive for diagnosis. The harness stops the host serial observer.
+Use the same checkout for cleanup.
+Stop the exact owned VM only through the guarded owner.
+Remove its state only through the guarded owner:
+
+```bash
+python3 tests/qemu_owner.py cleanup "${QEMU_STATE_DIR:?}" \
+  --sentinel "${QEMU_STATE_DIR:?}/.qemu-install-state" qemu-install-v1
+```
+
+The owner uses PIDFD signals.
+It verifies captured process/disk/executable identity and private directory identity.
+Unsupported PIDFD, missing startup identity, or any mismatch preserves state.
+Do not replace these checks with numeric PID kills or blind directory removal.
+
+External-client cleanup must use its own `--cleanup` mode.
+That mode also reconciles the captured peer on the confirmed VPS.
+
+Remote SSH/UFW negative cases are available through `pytest -m remote`.
+They are not part of routine CI or the `check.sh --release` sequence.
+Run these cases when a change touches the corresponding boundary.
+Report the exact scenarios that completed.
+
+Persist logs only in a private evidence directory.
+Scan logs for credentials before sharing.
 
 The provider firewall remains the operator's responsibility. Keep console or
 rescue access during every real deployment.

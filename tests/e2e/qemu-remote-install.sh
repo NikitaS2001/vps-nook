@@ -18,6 +18,7 @@
 #   QEMU_CLEANUP_PORT   second host tcp -> guest:<E2E_SSH_PORT> (2224)
 #   QEMU_WG_PORT        host udp -> guest:<E2E_WG_PORT> (51822)
 set -euo pipefail
+umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT_DIR}"
@@ -56,7 +57,7 @@ for tool in qemu-system-x86_64 qemu-img genisoimage curl ssh-keygen openssl ansi
 done
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ztvps-remote.XXXXXX")"
-QEMU_PID=""
+init_owned_qemu "${TMP_DIR}"
 UFW_GUARD_PID=""
 cleanup() {
     local cleanup_ok=true
@@ -74,18 +75,9 @@ cleanup() {
         fi
         wait "${UFW_GUARD_PID}" >/dev/null 2>&1 || true
     fi
-    if [[ -n "${QEMU_PID}" ]] && kill -0 "${QEMU_PID}" >/dev/null 2>&1; then
-        kill "${QEMU_PID}" >/dev/null 2>&1 || true
-        for _ in {1..10}; do
-            kill -0 "${QEMU_PID}" >/dev/null 2>&1 || break
-            sleep 1
-        done
-        if kill -0 "${QEMU_PID}" >/dev/null 2>&1; then
-            kill -9 "${QEMU_PID}" >/dev/null 2>&1 || true
-            cleanup_ok=false
-        fi
-    fi
-    rm -rf "${TMP_DIR}"
+    local owner_args=("${TMP_DIR}")
+    [[ "${cleanup_ok}" == true ]] || owner_args+=(--keep-state)
+    cleanup_owned_qemu "${owner_args[@]}" || cleanup_ok=false
     if [[ "${cleanup_ok}" == "true" && ! -e "${TMP_DIR}" ]]; then
         echo "[CLEANUP] qemu=stopped temp_keys=removed known_hosts=removed state=removed cleanup=complete"
     else
