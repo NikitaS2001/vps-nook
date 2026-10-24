@@ -149,6 +149,33 @@
   ansible.builtin.set_fact:
     vps_orchestration_traffic_live_validation: |
       set -euo pipefail
+      services_hook_absent() {
+        local rules
+        rules="$(timeout 10 docker exec wg-easy "$1" -S FORWARD)" || exit "$?"
+        python3 - "${rules}" <<'PY'
+      import shlex
+      import sys
+
+      saw_forward_policy = False
+      for line in sys.argv[1].splitlines():
+          tokens = shlex.split(line)
+          if tokens[:2] == ["-P", "FORWARD"]:
+              if len(tokens) != 3 or tokens[2] not in ("ACCEPT", "DROP"):
+                  raise SystemExit(2)
+              saw_forward_policy = True
+          if tokens[:2] != ["-A", "FORWARD"]:
+              continue
+          if (
+              "-i" in tokens
+              and tokens[tokens.index("-i") + 1] == "wg0"
+              and "-j" in tokens
+              and tokens[tokens.index("-j") + 1] == "WG_CLIENTS"
+          ):
+              raise SystemExit(1)
+      if not saw_forward_policy:
+          raise SystemExit(2)
+      PY
+      }
       validate_services_only_chain() {
         local family="$1" allowed="$2" rules
         rules="$(timeout 10 docker exec wg-easy "${family}" -S WG_CLIENTS)"
@@ -182,8 +209,8 @@
               && validate_services_only_chain ip6tables {{ wg_services_only_ipv6_destinations | to_json | quote }} \
               && exit 0
           else
-            ! timeout 10 docker exec wg-easy iptables -C FORWARD -i wg0 -j WG_CLIENTS 2>/dev/null \
-              && ! timeout 10 docker exec wg-easy ip6tables -C FORWARD -i wg0 -j WG_CLIENTS 2>/dev/null \
+            services_hook_absent iptables \
+              && services_hook_absent ip6tables \
               && exit 0
           fi
         fi

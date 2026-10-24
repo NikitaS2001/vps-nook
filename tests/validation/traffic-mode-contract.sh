@@ -5,6 +5,12 @@ umask 077
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/traffic-mode-contract.XXXXXX")"
 cleanup() {
+  local status=$?
+  if [[ "${TRAFFIC_TEST_PRESERVE_FAILURE:-0}" == 1 && "${status}" != 0 ]]; then
+    printf '[PRIVATE_FAILURE_ARTIFACTS] path=%s\n' "${TMP}"
+    trap - EXIT INT TERM
+    exit "${status}"
+  fi
   find "${TMP}" -depth -delete
   [[ ! -e "${TMP}" ]]
   printf '[CLEANUP] traffic_fixture_removed=%s\n' "${TMP}"
@@ -59,6 +65,28 @@ case "${1:-}" in
       [[ ! -e "${TRAFFIC_TEST_FAIL_READINESS:-/nonexistent}" ]]
       exit
     fi
+    # The production boundary must distinguish Docker transport failure from
+    # the container command's rule-absence exit, even when both are exit 1.
+    if [[ "${1:-}" == sh ]]; then
+      [[ "${TRAFFIC_TEST_QUERY_FAULT:-}" != daemon || "${TRAFFIC_TEST_QUERY_FAMILY:-${@: -1}}" != "${@: -1}" ]] || exit 1
+      exec "$@"
+    fi
+    query_status="${TRAFFIC_TEST_QUERY_FAULT:-}"
+    [[ "${TRAFFIC_TEST_QUERY_FAMILY:-${1}}" == "${1}" ]] || query_status=""
+    if [[ -n "${query_status}" && "${query_status}" != daemon ]]; then
+      if [[ "${1:-}" == iptables && "${2:-}" == -S && "${3:-}" == FORWARD ]]; then
+        case "${query_status}" in
+          empty) exit 0 ;;
+          malformed) printf '%s\n' 'malformed policy output'; exit 0 ;;
+          0)
+            printf '%s\n' '-P FORWARD ACCEPT' '-A FORWARD -i wg0 -j WG_CLIENTS'
+            exit 0
+            ;;
+        esac
+      fi
+      exit "${query_status}"
+    fi
+    [[ "${query_status}" != daemon ]] || exit 1
     firewall="$(python3 - "${TRAFFIC_TEST_DB:?}" <<'PY'
 import sqlite3,sys
 with sqlite3.connect(sys.argv[1]) as db:
@@ -71,6 +99,13 @@ PY
     if [[ "${1:-}" == -C ]]; then
       [[ "${firewall}" == 1 ]]
       exit
+    fi
+    if [[ "${1:-}" == -S && "${2:-}" == FORWARD ]]; then
+      printf '%s\n' '-P FORWARD ACCEPT'
+      if [[ "${firewall}" == 1 ]]; then
+        printf '%s\n' '-A FORWARD -i wg0 -j WG_CLIENTS'
+      fi
+      exit 0
     fi
     if [[ "${1:-}" == -S && "${2:-}" == WG_CLIENTS && "${firewall}" == 1 ]]; then
       if [[ "${family}" == iptables ]]; then
@@ -92,6 +127,14 @@ PY
 esac
 SH
 chmod 0755 "${BIN}/docker"
+for family in iptables ip6tables; do
+  cat >"${BIN}/${family}" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+exec docker exec wg-easy "$(basename "$0")" "$@"
+SH
+  chmod 0755 "${BIN}/${family}"
+done
 cat >"${BIN}/cp" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -192,6 +235,48 @@ after_mutations="$(grep -Ec '^docker (stop|start) ' "${LOG}" || true)"
 runtime_drift_mutation_delta="$((after_mutations - before_mutations))"
 unset TRAFFIC_TEST_RUNTIME_DRIFT
 
+# Exercise the actual Ansible transaction and its SQLite/marker rollback for
+# both selected executables. A failed rule-list query is never absence.
+for backend in wg awg; do
+  export TRAFFIC_TEST_EXECUTABLE="${backend}"
+  amnezia=false
+  [[ "${backend}" != awg ]] || amnezia=true
+  for fault in 1 empty malformed 70 127 124 daemon 0; do
+    cp "${DB}" "${TMP}/before-query.db"
+    cp "${PROJECT}/.wg-traffic-mode" "${TMP}/before-query.marker"
+    export TRAFFIC_TEST_QUERY_FAULT="${fault}"
+    code=0
+    ansible-playbook "${TMP}/playbook.yml" -e "wg_amnezia_enabled=${amnezia}" \
+      -e wg_traffic_mode=full >"${TMP}/query-fault.log" 2>&1 || code=$?
+    unset TRAFFIC_TEST_QUERY_FAULT
+    if [[ "${code}" != 2 ]]; then
+      printf '[FAIL] firewall-query backend=%s fault=%s expected=2 actual=%s\n' "${backend}" "${fault}" "${code}" >&2
+      exit 1
+    fi
+    cmp "${DB}" "${TMP}/before-query.db"
+    cmp "${PROJECT}/.wg-traffic-mode" "${TMP}/before-query.marker"
+    [[ -z "$(find "${PROJECT}" -maxdepth 1 -name '.wg-traffic-mode.transaction.*' -print -quit)" ]]
+    printf '[PASS] firewall-query backend=%s fault=%s exit=2 sqlite_and_marker_byte_restored=true\n' "${backend}" "${fault}"
+  done
+  cp "${DB}" "${TMP}/before-query.db"
+  cp "${PROJECT}/.wg-traffic-mode" "${TMP}/before-query.marker"
+  export TRAFFIC_TEST_QUERY_FAULT=70 TRAFFIC_TEST_QUERY_FAMILY=ip6tables
+  code=0
+  ansible-playbook "${TMP}/playbook.yml" -e "wg_amnezia_enabled=${amnezia}" \
+    -e wg_traffic_mode=full >"${TMP}/query-ipv6-fault.log" 2>&1 || code=$?
+  unset TRAFFIC_TEST_QUERY_FAULT TRAFFIC_TEST_QUERY_FAMILY
+  [[ "${code}" == 2 ]]
+  cmp "${DB}" "${TMP}/before-query.db"
+  cmp "${PROJECT}/.wg-traffic-mode" "${TMP}/before-query.marker"
+  printf '[PASS] firewall-query backend=%s family=ip6tables fault=70 exit=2 sqlite_and_marker_byte_restored=true\n' "${backend}"
+  ansible-playbook "${TMP}/playbook.yml" -e "wg_amnezia_enabled=${amnezia}" \
+    -e wg_traffic_mode=full >"${TMP}/query-absent.log" 2>&1
+  [[ "$(<"${PROJECT}/.wg-traffic-mode")" == full ]]
+  printf '[PASS] firewall-query backend=%s exact_rule_absent=true query_exit=0 full_commit=true\n' "${backend}"
+  ansible-playbook "${TMP}/playbook.yml" -e "wg_amnezia_enabled=${amnezia}" >"${TMP}/query-reset.log" 2>&1
+done
+export TRAFFIC_TEST_EXECUTABLE=wg
+
 python3 - "${DB}" <<'PY'
 import json,sqlite3,sys
 with sqlite3.connect(sys.argv[1]) as db:
@@ -219,6 +304,35 @@ ansible-playbook "${TMP}/playbook.yml" \
   -e vps_orchestration_full_ipv6_enabled=false >"${TMP}/full-ipv4-only.log"
 [[ "$(<"${PROJECT}/.wg-traffic-mode")" == full ]]
 [[ "$(read_policy)" == '{"client": null, "firewall": 0, "routes": ["0.0.0.0/0"]}' ]]
+
+# Execute the exact SSH guest command built by common.sh, not an imitation
+# of its firewall assertion. SSH/sudo are local adapters, no host privileges.
+(
+  source "${ROOT}/tests/e2e/common.sh"
+  sudo() { "$@"; }
+  export -f sudo
+  sudo test -d "${TMP}"
+  run_remote() {
+    case "$4" in
+      'sudo cat /opt/vps-nook/.wg-traffic-mode') printf 'full\n' ;;
+      *) bash -c "$4" ;;
+    esac
+  }
+  unset TRAFFIC_TEST_QUERY_FAULT TRAFFIC_TEST_QUERY_FAMILY
+  (TRAFFIC_TEST_QUERY_FAULT="" verify_traffic_mode fixture 22 fixture full)
+  printf '[PASS] guest-firewall-query fault=none exact_rule_absent=true query_exit=0\n'
+  for fault in 1 empty malformed 0 70 127 124 daemon; do
+    code=0
+    (TRAFFIC_TEST_QUERY_FAULT="${fault}" verify_traffic_mode fixture 22 fixture full) \
+      >"${TMP}/guest-query.log" 2>&1 || code=$?
+    if [[ "${code}" == 0 ]]; then
+      printf '[FAIL] guest-firewall-query fault=%s expected=nonzero actual=0\n' "${fault}" >&2
+      exit 1
+    fi
+    printf '[PASS] guest-firewall-query fault=%s exit=%s query_error_not_absence=true\n' \
+      "${fault}" "${code}"
+  done
+)
 
 # Isolate each backend run: a previous successful query cannot satisfy it.
 export TRAFFIC_TEST_EXECUTABLE=awg

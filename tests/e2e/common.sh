@@ -385,9 +385,43 @@ verify_traffic_mode() {
         # shellcheck disable=SC2016
         run_remote "${target}" "${port}" "${key}" \
             'sudo bash -eu -o pipefail -c '\''
-                ! docker exec wg-easy iptables -C FORWARD -i wg0 -j WG_CLIENTS 2>/dev/null &&
-                ! docker exec wg-easy ip6tables -C FORWARD -i wg0 -j WG_CLIENTS 2>/dev/null
-            '\''' || fail "full unexpectedly retained services firewall hooks"
+                for family in iptables ip6tables; do
+                    rules="$(timeout 10 docker exec wg-easy "${family}" -S FORWARD)" \
+                        || exit "$?"
+                    policy=0
+                    hook=0
+                    while IFS= read -r line; do
+                        tokens=()
+                        read -r -a tokens <<<"${line}"
+                        if [[ "${tokens[0]:-}" == "-P" \
+                              && "${tokens[1]:-}" == "FORWARD" \
+                              && "${#tokens[@]}" -eq 3 ]]; then
+                            case "${tokens[2]:-}" in
+                                ACCEPT|DROP) policy=1 ;;
+                            esac
+                        fi
+                        if [[ "${tokens[0]:-}" == "-A" \
+                              && "${tokens[1]:-}" == "FORWARD" ]]; then
+                            ingress=0
+                            destination=0
+                            for ((index = 2; index + 1 < ${#tokens[@]}; index++)); do
+                                if [[ "${tokens[index]}" == "-i" \
+                                      && "${tokens[index + 1]}" == "wg0" ]]; then
+                                    ingress=1
+                                fi
+                                if [[ "${tokens[index]}" == "-j" \
+                                      && "${tokens[index + 1]}" == "WG_CLIENTS" ]]; then
+                                    destination=1
+                                fi
+                            done
+                            if [[ "${ingress}" == 1 && "${destination}" == 1 ]]; then
+                                hook=1
+                            fi
+                        fi
+                    done <<<"${rules}"
+                    [[ "${policy}" == 1 && "${hook}" == 0 ]] || exit 1
+                done
+            '\''' || fail "full firewall hooks could not be verified absent"
     fi
 }
 
