@@ -166,6 +166,16 @@ The role refuses other kernel flavours. It also refuses these host conditions:
 Builds use one CPU, a 512 MiB memory limit, no build swap, and a 20-minute timeout.
 The role uses no PPA, userspace fallback, kernel replacement, or automatic reboot.
 
+Cancellation stops the owned build service and confirms its cgroup is empty
+before releasing the module lock. If start or termination cannot be confirmed,
+`/var/lib/vps-nook/amneziawg/build-transaction` remains as a recovery barrier.
+Later managed operations refuse this state, including after reboot.
+Preserve its `transaction.json` and any `started.json` for investigation.
+Do not delete the directory merely because the caller exited or a unit query
+returns `not found`. Confirm the captured service and its descendants stopped,
+then reconcile the interrupted DKMS state before explicitly recovering it.
+This barrier does not claim that a process lock survives its owner's exit.
+
 The shared preflight runs before fresh encrypted-state commitment.
 Its network-backed signed dependency feasibility check has a separate
 24-minute installer budget, not the 30-second secret/vault command budget.

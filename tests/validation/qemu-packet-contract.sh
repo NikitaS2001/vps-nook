@@ -190,6 +190,110 @@ for backend in wg awg; do
     done
 done
 
+# Execute the top-level public IPv6 owner, not a reconstructed policy function.
+# Its EXIT trap must preserve main/foreign routes even when the full probe fails.
+awk '
+    /^if \[\[ "\$\{public_ipv6\}" == true \]\] && grep -q/ {body=1}
+    body {print}
+    body && /^fi$/ {exit}
+' "${CLIENT}" >"${TMP_DIR}/public-ipv6-owner.sh"
+[[ -s "${TMP_DIR}/public-ipv6-owner.sh" ]]
+for scenario in services full failed-full; do
+    for initial_route in present absent; do
+        (
+            CLIENT_STATE="$(mktemp -d "${TMP_DIR}/public-ipv6.XXXXXX")"
+            cd "${CLIENT_STATE}"
+            ROUTING_STATE="${CLIENT_STATE}/routing"
+            mkdir -p "${ROUTING_STATE}/main" "${ROUTING_STATE}/probe" \
+                "${ROUTING_STATE}/foreign"
+            printf 'eth0\n' >"${ROUTING_STATE}/main/unrelated"
+            if [[ "${initial_route}" == present ]]; then
+                printf 'eth1\n' >"${ROUTING_STATE}/main/2606:4700:4700::1111"
+            fi
+            printf 'foreign-route\n' >"${ROUTING_STATE}/foreign/table-4"
+            printf 'foreign-rule\n' >"${ROUTING_STATE}/foreign/rule-6"
+            cp -a "${ROUTING_STATE}/main" "${CLIENT_STATE}/expected-main"
+            cp -a "${ROUTING_STATE}/foreign" "${CLIENT_STATE}/expected-foreign"
+            touch "${ROUTING_STATE}/zt-e2e"
+            printf '[Peer]\nAllowedIPs = ::/0\n' >zt-e2e.conf
+            ip() {
+                local entry
+                if [[ "$1 ${2:-} ${3:-}" == 'link delete zt-e2e' ]]; then
+                    rm "${ROUTING_STATE}/zt-e2e"
+                    # Kernel interface removal also removes its main-table routes.
+                    for entry in "${ROUTING_STATE}/main/"*; do
+                        [[ "$(<"${entry}")" != zt-e2e ]] || rm "${entry}"
+                    done
+                elif [[ "${2:-}" == -j ]]; then
+                    # Existing foreign routing is not owned by this probe.
+                    printf '[{"table":51823,"priority":12000}]\n'
+                elif [[ "${2:-} ${3:-}" == 'route replace' ]]; then
+                    [[ "$1" == -6 && "$4" == 2606:4700:4700::1111/128 \
+                        && "$5" == dev && "$6" == zt-e2e ]] || return 2
+                    printf 'zt-e2e\n' >"${ROUTING_STATE}/main/2606:4700:4700::1111"
+                elif [[ "${2:-} ${3:-}" == 'route add' ]]; then
+                    [[ "$4" == default && "$5" == dev && "$6" == zt-e2e \
+                        && "$7" == table && "$8" == 51822 ]] || return 2
+                    printf 'zt-e2e\n' >"${ROUTING_STATE}/probe/table-${1#-}"
+                elif [[ "${2:-} ${3:-}" == 'rule add' ]]; then
+                    [[ "$4" == priority && "$8" == lookup && "$9" == 51822 ]] || return 2
+                    printf '%s\n' "$6:$7" >"${ROUTING_STATE}/probe/rule-${1#-}-$5"
+                elif [[ "${2:-} ${3:-}" == 'rule del' ]]; then
+                    [[ "$4" == priority && "$8" == lookup && "$9" == 51822 ]] || return 2
+                    rm "${ROUTING_STATE}/probe/rule-${1#-}-$5"
+                elif [[ "${2:-} ${3:-}" == 'route flush' ]]; then
+                    [[ "$4" == table && "$5" == 51822 ]] || return 2
+                    rm "${ROUTING_STATE}/probe/table-${1#-}"
+                else
+                    return 2
+                fi
+            }
+            curl() {
+                [[ "$1" == --interface && "$2" == zt-e2e ]] || return 2
+                [[ -f "${ROUTING_STATE}/zt-e2e" \
+                    && "$(<"${ROUTING_STATE}/probe/table-6")" == zt-e2e \
+                    && "$(<"${ROUTING_STATE}/probe/rule-6-11001")" == oif:zt-e2e ]] || return 2
+                touch "${CLIENT_STATE}/probe-requested"
+                [[ "${scenario}" == full ]]
+            }
+            # No guest command may escape to the host if cleanup regresses.
+            docker() { return 2; }
+            export CLIENT_IPV4=10.8.0.7 CLIENT_IPV6=fd42:42:42::7
+            PROBE_ROUTE_TABLE=51822 PROBE_RULE_PRIORITY=11000
+            result=0
+            # Do not use `(...) ||`: that disables errexit inside the owner.
+            set +e
+            (
+                set -e
+                PROBE_ROUTE_FAMILIES=() PROBE_ROUTE_RULES=()
+                CLIENT_ACTION=check CLIENT_ID="" API_CLIENT_ID="" CONTROL_CONTAINER=""
+                TUNNEL_CREATED=true public_ipv6=true
+                WG_TRAFFIC_MODE=full
+                [[ "${scenario}" != services ]] || WG_TRAFFIC_MODE=services
+                trap cleanup EXIT
+                configure_probe_routing
+                source "${TMP_DIR}/public-ipv6-owner.sh"
+            )
+            result=$?
+            set -e
+            if [[ "${scenario}" == failed-full ]]; then
+                [[ "${result}" != 0 ]]
+            else
+                [[ "${result}" == 0 ]]
+            fi
+            [[ -f "${CLIENT_STATE}/probe-requested" ]]
+            [[ ! -e "${ROUTING_STATE}/zt-e2e" ]]
+            [[ -z "$(find "${ROUTING_STATE}/probe" -type f -print -quit)" ]]
+            if ! diff -ru "${CLIENT_STATE}/expected-main" "${ROUTING_STATE}/main"; then
+                printf 'qemu-packet-contract: public IPv6 changed main routes: %s initial=%s\n' \
+                    "${scenario}" "${initial_route}" >&2
+                exit 1
+            fi
+            diff -ru "${CLIENT_STATE}/expected-foreign" "${ROUTING_STATE}/foreign"
+        )
+    done
+done
+
 for scenario in services full unavailable-ipv6 leaked-ipv6; do
     (
         export WG_TRAFFIC_MODE=services DIRECT_INTERFACE=bridge

@@ -103,31 +103,97 @@ def fake_lock():
     return locked
 
 
-def test_build_failure_preserves_previous_receipt(owner, monkeypatch):
+@pytest.mark.parametrize('failure', ['compiler', 'timeout', 'interrupt', 'sigterm', 'success'])
+def test_build_cancellation_stops_before_unlock(owner, tmp_path, monkeypatch, failure):
+    import fcntl
+    import os
+    import signal
+    import subprocess
+
+    pending = tmp_path / 'build-transaction'
+    monkeypatch.setattr(owner, 'STATE', tmp_path)
+    monkeypatch.setattr(owner, 'LOCK', tmp_path / 'module.lock')
+    monkeypatch.setattr(owner, 'BUILD_PENDING', pending, raising=False)
+    monkeypatch.setattr(owner, 'guard', lambda *args, **kwargs: None)
+    monkeypatch.setattr(owner, 'dependency_build_scope', lambda: [])
+    monkeypatch.delenv(owner.LOCK_ENV, raising=False)
     value = {'kernels': {'old': {'phase': 'ready', 'module_sha256': 'unchanged'}}}
     before = json.dumps(value, sort_keys=True)
-    calls = []
-    monkeypatch.setattr(owner, 'module_lock', fake_lock())
     monkeypatch.setattr(owner, 'read_receipt', lambda: value)
-    monkeypatch.setattr(owner, 'platform_check', lambda kernel, **kwargs: None)
-    monkeypatch.setattr(owner, 'verify_source', lambda receipt: None)
+    monkeypatch.setattr(owner, 'platform_check', lambda *args, **kwargs: None)
+    monkeypatch.setattr(owner, 'verify_source', lambda *args: None)
     monkeypatch.setattr(owner, 'verify_dependency_payloads', lambda *args: None)
     monkeypatch.setattr(owner, 'authenticate_update_dependencies', lambda *args: None)
     monkeypatch.setattr(owner.Path, 'cwd', lambda: Path(f'/var/lib/dkms/{owner.MODULE}/{owner.DKMS_VERSION}/build'))
+    monkeypatch.setattr(owner, 'sha256', lambda *args: 'digest')
+    events = []
+    monkeypatch.setattr(owner, 'write_receipt', lambda *args: events.append('receipt'))
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
 
-    def reject(argv, **kwargs):
-        calls.append(argv)
-        raise owner.Refusal('compiler failed')
+    def locked():
+        fd = os.open(owner.LOCK, os.O_RDWR)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(fd)
 
-    monkeypatch.setattr(owner, 'run', reject)
-    with pytest.raises(owner.Refusal, match='compiler failed'):
-        owner.compile_module('6.1.0-53-cloud-amd64')
-    assert json.dumps(value, sort_keys=True) == before
-    command = calls[0]
-    assert command[0] == 'systemd-run'
-    assert 'MemoryMax=512M' in command and 'MemorySwapMax=0' in command
-    assert 'PrivateNetwork=yes' in command and 'RuntimeMaxSec=1200' in command
-    assert not any('modprobe' in part for part in command)
+    def managed(argv, **kwargs):
+        if argv[0] == 'systemd-run':
+            locked()
+            events.append('start')
+            if pending.exists():
+                transaction = json.loads((pending / 'transaction.json').read_text())
+                (pending / 'started.json').write_text(json.dumps(dict(unit=transaction['unit'], pid=123)))
+                (pending / 'started.json').chmod(0o600)
+            if failure == 'compiler':
+                raise owner.Refusal('compiler failed')
+            if failure == 'timeout':
+                raise subprocess.TimeoutExpired(argv, 1)
+            if failure == 'interrupt':
+                raise KeyboardInterrupt()
+            if failure == 'sigterm':
+                signal.raise_signal(signal.SIGTERM)
+            return subprocess.CompletedProcess(argv, 0, stdout='{"elapsed_seconds": 1}\n', stderr='')
+        if argv[:2] == ['systemctl', 'stop']:
+            locked()
+            events.append('stop')
+            assert signal.getsignal(signal.SIGINT) == signal.SIG_IGN
+            assert signal.getsignal(signal.SIGTERM) == signal.SIG_IGN
+            signal.raise_signal(signal.SIGINT)
+            signal.raise_signal(signal.SIGTERM)
+            return subprocess.CompletedProcess(argv, 0, stdout='', stderr='')
+        assert argv[0] == 'modinfo'
+        assert events[-1] == 'empty'
+        return subprocess.CompletedProcess(argv, 0,
+            stdout=f'version: {owner.VERSION}\nvermagic: k\nsrcversion: identity\n', stderr='')
+
+    def empty(name, expected_group):
+        locked()
+        assert events[-1] == 'stop'
+        transaction = json.loads((pending / 'transaction.json').read_text())
+        assert name == transaction['unit'] + '.service'
+        assert expected_group == '/system.slice/' + name
+        events.append('empty')
+        return True
+
+    monkeypatch.setattr(owner, 'run', managed)
+    monkeypatch.setattr(owner, 'dependency_control_group_empty', empty)
+    errors = {'compiler': owner.Refusal, 'timeout': subprocess.TimeoutExpired,
+              'interrupt': KeyboardInterrupt, 'sigterm': owner.Refusal}
+    if failure == 'success':
+        owner.compile_module('k')
+    else:
+        with pytest.raises(errors[failure]):
+            owner.compile_module('k')
+    assert events[:3] == ['start', 'stop', 'empty']
+    assert not pending.exists()
+    assert {sig: signal.getsignal(sig) for sig in previous} == previous
+    with owner.module_lock():
+        pass
+    if failure != 'success':
+        assert json.dumps(value, sort_keys=True) == before
+        assert 'receipt' not in events
 
 
 def test_load_failure_does_not_publish_ready(owner, monkeypatch):
@@ -940,3 +1006,298 @@ def test_historical_release_scope_and_declared_epoch_fail_closed(owner, tmp_path
     path.write_text(path.read_text().replace(old, new))
     with pytest.raises(owner.Refusal):
         owner.verify_historical_release_scope(tmp_path)
+
+
+def build_fixture(owner, tmp_path, monkeypatch):
+    monkeypatch.setattr(owner, 'STATE', tmp_path)
+    monkeypatch.setattr(owner, 'LOCK', tmp_path / 'module.lock')
+    monkeypatch.setattr(owner, 'BUILD_PENDING', tmp_path / 'build-transaction')
+    monkeypatch.setattr(owner, 'guard', lambda *args, **kwargs: None)
+    monkeypatch.setattr(owner, 'dependency_build_scope', lambda: [])
+    monkeypatch.delenv(owner.LOCK_ENV, raising=False)
+    return tmp_path / 'build'
+
+
+@pytest.mark.parametrize('failure', [
+    'stop-error', 'stop-nonzero', 'live-group', 'missing-ack', 'malformed-ack',
+    'foreign-ack', 'bool-pid', 'start-error', 'changed-transaction', 'unknown-file',
+])
+def test_uncertain_build_preserves_boundary_and_blocks_next_operations(
+        owner, tmp_path, monkeypatch, failure):
+    import signal
+    import subprocess
+
+    build = build_fixture(owner, tmp_path, monkeypatch)
+    pending = owner.BUILD_PENDING
+    calls = []
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+    launch_error = owner.Refusal('launch failed before acknowledgement')
+    metadata = []
+
+    def managed(argv, **kwargs):
+        calls.append(argv)
+        if argv[0] == 'systemd-run':
+            transaction = json.loads((pending / 'transaction.json').read_text())
+            metadata.append((pending / 'transaction.json').read_bytes())
+            if failure == 'start-error':
+                raise launch_error
+            if failure != 'missing-ack':
+                started = dict(unit=transaction['unit'], pid=123)
+                if failure == 'foreign-ack':
+                    started['unit'] = 'foreign'
+                if failure == 'bool-pid':
+                    started['pid'] = True
+                (pending / 'started.json').write_text(
+                    '{broken' if failure == 'malformed-ack' else json.dumps(started))
+            if failure == 'changed-transaction':
+                transaction['build'] = '/different'
+                (pending / 'transaction.json').write_text(json.dumps(transaction))
+            if failure == 'unknown-file':
+                (pending / 'operator-data').write_text('preserve me')
+        elif failure == 'stop-error':
+            raise owner.Refusal('manager unavailable')
+        return subprocess.CompletedProcess(argv, 1 if failure == 'stop-nonzero' else 0, stdout='', stderr='')
+
+    monkeypatch.setattr(owner, 'run', managed)
+    monkeypatch.setattr(owner, 'dependency_control_group_empty',
+                        lambda *args: failure not in ('live-group', 'stop-nonzero'))
+    with owner.module_lock():
+        with pytest.raises(owner.Refusal, match='termination unconfirmed') as caught:
+            owner.run_build_transaction('k', build)
+    assert pending.is_dir() and (pending / 'transaction.json').is_file()
+    assert 'nook-awg-build-' in str(caught.value) and str(pending) in str(caught.value)
+    if failure == 'start-error':
+        assert caught.value.__cause__ is launch_error
+    if failure != 'changed-transaction':
+        assert (pending / 'transaction.json').read_bytes() == metadata[0]
+    if failure == 'unknown-file':
+        assert (pending / 'operator-data').read_text() == 'preserve me'
+        assert (pending / 'started.json').is_file()
+    before = len(calls)
+    with pytest.raises(owner.Refusal, match='Interrupted/active AWG build transaction'):
+        with owner.module_lock():
+            pytest.fail('must refuse before yielding')
+    with pytest.raises(owner.Refusal, match='Interrupted/active AWG build transaction'):
+        owner.inspect_state()
+    assert len(calls) == before
+    assert {sig: signal.getsignal(sig) for sig in previous} == previous
+
+
+def test_collected_successful_build_clears_boundary(owner, tmp_path, monkeypatch):
+    import subprocess
+
+    build = build_fixture(owner, tmp_path, monkeypatch)
+    pending = owner.BUILD_PENDING
+
+    def managed(argv, **kwargs):
+        if argv[0] == 'systemd-run':
+            transaction = json.loads((pending / 'transaction.json').read_text())
+            (pending / 'started.json').write_text(json.dumps(dict(unit=transaction['unit'], pid=123)))
+            return subprocess.CompletedProcess(argv, 0, stdout='{"elapsed_seconds": 1}', stderr='')
+        if argv[1] == 'stop':
+            return subprocess.CompletedProcess(argv, 5, stdout='', stderr='Unit not loaded')
+        assert argv[1] == 'show'
+        return subprocess.CompletedProcess(argv, 0, stdout=(
+            'LoadState=not-found\nActiveState=inactive\nSubState=dead\nMainPID=0\nControlGroup=\n'), stderr='')
+
+    monkeypatch.setattr(owner, 'run', managed)
+    with owner.module_lock():
+        result = owner.run_build_transaction('k', build)
+    assert result.stdout == '{"elapsed_seconds": 1}'
+    assert not pending.exists()
+
+
+
+@pytest.mark.parametrize('existing', ['directory', 'symlink'])
+def test_existing_build_marker_never_overwritten(owner, tmp_path, monkeypatch, existing):
+    build = build_fixture(owner, tmp_path, monkeypatch)
+    pending = owner.BUILD_PENDING
+    if existing == 'symlink':
+        pending.symlink_to(tmp_path / 'missing')
+    else:
+        pending.mkdir(mode=0o700)
+        (pending / 'operator-data').write_text('unchanged')
+    monkeypatch.setattr(owner, 'run', lambda *args, **kwargs: pytest.fail('no commands allowed'))
+    with pytest.raises(owner.Refusal, match='Interrupted/active AWG build transaction'):
+        with owner.module_lock():
+            pass
+    with pytest.raises(owner.Refusal, match='Interrupted/active AWG build transaction'):
+        owner.inspect_state()
+    with pytest.raises(FileExistsError):
+        owner.run_build_transaction('k', build)
+    if existing == 'symlink':
+        assert pending.is_symlink()
+    else:
+        assert (pending / 'operator-data').read_text() == 'unchanged'
+
+
+@pytest.mark.parametrize('barrier', ['file', 'directory', 'state'])
+def test_build_publication_failure_never_launches(owner, tmp_path, monkeypatch, barrier):
+    build = build_fixture(owner, tmp_path, monkeypatch)
+    monkeypatch.setattr(owner, 'run', lambda *args, **kwargs: pytest.fail('must not launch'))
+
+    def failed(*args):
+        raise OSError('durability failure')
+
+    if barrier == 'file':
+        monkeypatch.setattr(owner.os, 'fsync', failed)
+    elif barrier == 'directory':
+        monkeypatch.setattr(owner, 'sync_build_directory', failed)
+    else:
+        monkeypatch.setattr(owner, 'sync_state_directory', failed)
+    with owner.module_lock():
+        with pytest.raises(OSError, match='durability'):
+            owner.run_build_transaction('k', build)
+    assert owner.BUILD_PENDING.is_dir()
+    assert (owner.BUILD_PENDING / 'transaction.json').is_file()
+
+
+@pytest.mark.parametrize('invalid', [
+    'none', 'missing', 'broken', 'extra-field', 'schema', 'kernel', 'unit', 'relative-build',
+    'slice', 'cwd', 'cgroup', 'environment-only', 'existing-ack',
+])
+def test_build_acknowledgement_checks_transaction_and_real_cgroup(
+        owner, tmp_path, monkeypatch, invalid):
+    build = build_fixture(owner, tmp_path, monkeypatch)
+    pending = owner.BUILD_PENDING
+    unit = 'nook-awg-build-' + 'a' * 32
+    transaction = dict(schema=1, unit=unit, kernel='k', build=str(build), slice='system.slice')
+    pending.mkdir(mode=0o700)
+    if invalid == 'extra-field':
+        transaction['extra'] = True
+    elif invalid == 'schema':
+        transaction['schema'] = True
+    elif invalid in ('kernel', 'unit', 'slice'):
+        transaction[invalid] = 'foreign'
+    elif invalid == 'relative-build':
+        transaction['build'] = 'relative'
+    monkeypatch.setattr(owner, 'run', lambda *args, **kwargs: pytest.fail('must refuse before make'))
+    path = pending / 'transaction.json'
+    if invalid != 'missing':
+        path.write_text('{broken' if invalid == 'broken' else json.dumps(transaction))
+        path.chmod(0o600)
+    if invalid == 'existing-ack':
+        (pending / 'started.json').write_text('preserve')
+    original_read = owner.Path.read_text
+
+    def read(path, *args, **kwargs):
+        if str(path) == '/proc/self/cgroup':
+            return '0::/' + ('foreign' if invalid in ('cgroup', 'environment-only')
+                             else 'system.slice/' + unit + '.service') + '\n'
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(owner.Path, 'read_text', read)
+    monkeypatch.setattr(owner.Path, 'cwd', lambda: tmp_path if invalid == 'cwd' else build)
+    monkeypatch.setenv('NOOK_AWG_BUILD_UNIT', unit)
+    if invalid == 'none':
+        owner.acknowledge_build_start('k')
+        started = json.loads((pending / 'started.json').read_text())
+        assert started == dict(unit=unit, pid=owner.os.getpid())
+        assert (pending / 'started.json').stat().st_mode & 0o777 == 0o600
+    else:
+        with pytest.raises(owner.Refusal):
+            owner.bounded_make('k')
+        if invalid == 'existing-ack':
+            assert (pending / 'started.json').read_text() == 'preserve'
+        else:
+            assert not (pending / 'started.json').exists()
+
+
+def test_inherited_build_lock_remains_open_and_external_slice_is_not_stopped(owner, tmp_path, monkeypatch):
+    import os
+    import subprocess
+    from types import SimpleNamespace
+
+    build = build_fixture(owner, tmp_path, monkeypatch)
+    slice_name = 'nook_awg_deps_' + 'b' * 32 + '.slice'
+    monkeypatch.setattr(owner, 'dependency_build_scope', lambda: ['--slice=' + slice_name])
+    original_fstat = owner.os.fstat
+    calls = []
+
+    def root_owned(fd):
+        info = original_fstat(fd)
+        return SimpleNamespace(st_ino=info.st_ino, st_dev=info.st_dev, st_mode=info.st_mode, st_uid=0)
+
+    def managed(argv, **kwargs):
+        calls.append(argv)
+        if argv[0] == 'systemd-run':
+            transaction = json.loads((owner.BUILD_PENDING / 'transaction.json').read_text())
+            assert transaction['slice'] == slice_name
+            assert '--slice=' + slice_name in argv
+            assert '--service-type=exec' in argv and '--collect' not in argv
+            for option in ('MemoryMax=512M', 'MemorySwapMax=0', 'CPUQuota=100%',
+                           'PrivateNetwork=yes', 'RuntimeMaxSec=1200', 'KillMode=control-group',
+                           'TimeoutStopSec=30', 'SendSIGKILL=yes'):
+                assert option in argv
+            assert kwargs['timeout'] == owner.BUILD_TIMEOUT + owner.COMMAND_TIMEOUT
+            assert len(transaction['unit'].removeprefix('nook-awg-build-')) == 32
+            assert owner.BUILD_PENDING.stat().st_mode & 0o777 == 0o700
+            assert (owner.BUILD_PENDING / 'transaction.json').stat().st_mode & 0o777 == 0o600
+            (owner.BUILD_PENDING / 'started.json').write_text(
+                json.dumps(dict(unit=transaction['unit'], pid=123)))
+        else:
+            assert argv[:2] == ['systemctl', 'stop'] and len(argv) == 3
+            assert argv[2].endswith('.service') and slice_name not in argv
+        return subprocess.CompletedProcess(argv, 0, stdout='metrics', stderr='')
+
+    def empty(name, group):
+        assert group == '/' + slice_name + '/' + name
+        return True
+
+    monkeypatch.setattr(owner, 'run', managed)
+    monkeypatch.setattr(owner, 'dependency_control_group_empty', empty)
+    with owner.module_lock() as ancestor:
+        monkeypatch.setenv(owner.LOCK_ENV, str(ancestor))
+        monkeypatch.setattr(owner.os, 'fstat', root_owned)
+        with owner.module_lock() as inherited:
+            assert inherited == ancestor
+            result = owner.run_build_transaction('k', build)
+        os.fstat(ancestor)
+        assert result.stdout == 'metrics'
+        owner.BUILD_PENDING.mkdir(mode=0o700)
+        with pytest.raises(owner.Refusal, match='Interrupted/active AWG build transaction'):
+            with owner.module_lock():
+                pass
+        os.fstat(ancestor)
+        owner.BUILD_PENDING.rmdir()
+    assert len(calls) == 2
+
+
+def test_build_launch_follows_durable_publication(owner, tmp_path, monkeypatch):
+    import subprocess
+
+    build = build_fixture(owner, tmp_path, monkeypatch)
+    barriers = []
+    original_fsync = owner.os.fsync
+    original_sync_directory = owner.sync_build_directory
+    original_sync_state = owner.sync_state_directory
+
+    def fsync(fd):
+        barriers.append('fsync')
+        original_fsync(fd)
+
+    def sync_directory():
+        barriers.append('directory')
+        original_sync_directory()
+
+    def sync_state():
+        barriers.append('state')
+        original_sync_state()
+
+    def managed(argv, **kwargs):
+        if argv[0] == 'systemd-run':
+            assert barriers == ['fsync', 'directory', 'fsync', 'state', 'fsync']
+            transaction = json.loads((owner.BUILD_PENDING / 'transaction.json').read_text())
+            assert transaction['kernel'] == 'k' and transaction['build'] == str(build)
+            (owner.BUILD_PENDING / 'started.json').write_text(
+                json.dumps(dict(unit=transaction['unit'], pid=123)))
+        return subprocess.CompletedProcess(argv, 0, stdout='result', stderr='')
+
+    monkeypatch.setattr(owner.os, 'fsync', fsync)
+    monkeypatch.setattr(owner, 'sync_build_directory', sync_directory)
+    monkeypatch.setattr(owner, 'sync_state_directory', sync_state)
+    monkeypatch.setattr(owner, 'run', managed)
+    monkeypatch.setattr(owner, 'dependency_control_group_empty', lambda *args: True)
+    with owner.module_lock():
+        assert owner.run_build_transaction('k', build).stdout == 'result'
+    assert barriers[-2:] == ['state', 'fsync']

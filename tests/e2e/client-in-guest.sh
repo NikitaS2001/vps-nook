@@ -453,7 +453,6 @@ else
     [[ "${WG_TRAFFIC_MODE}" == services ]] || exit 1
 fi
 if [[ "${public_ipv6}" == true ]] && grep -q '::/0' zt-e2e.conf; then
-    ip -6 route replace 2606:4700:4700::1111/128 dev zt-e2e
     if control_request zt-e2e 'https://[2606:4700:4700::1111]/cdn-cgi/trace'; then
         [[ "${WG_TRAFFIC_MODE}" == full ]] || exit 1
     else

@@ -45,6 +45,7 @@ ARCHIVE = STATE / 'source.tar.gz'
 RECEIPT = STATE / 'receipt.json'
 LOCK = STATE / 'module.lock'
 DEPENDENCY_PENDING = STATE / 'dependency-transaction.json'
+BUILD_PENDING = STATE / 'build-transaction'
 OWNER = Path('/usr/local/lib/vps-nook/awg_module.py')
 LOCK_ENV = 'NOOK_AWG_LOCK_FD'
 LOADED = Path('/sys/module/amneziawg')
@@ -908,6 +909,8 @@ def verify_source(value):
 
 
 def inspect_state():
+    require(not BUILD_PENDING.exists() and not BUILD_PENDING.is_symlink(),
+            'Interrupted/active AWG build transaction; preserve state and recover explicitly')
     if not STATE.exists() and not STATE.is_symlink():
         require(not SOURCE.exists() and not SOURCE.is_symlink(), 'Foreign AWG source directory')
         require(not Path('/var/lib/dkms/amneziawg').exists(), 'Foreign AWG DKMS state')
@@ -1022,12 +1025,16 @@ def module_lock():
         expected = LOCK.lstat()
         require(info.st_ino == expected.st_ino and info.st_dev == expected.st_dev
                 and info.st_uid == 0 and stat.S_ISREG(info.st_mode), 'Invalid inherited module lock')
+        require(not BUILD_PENDING.exists() and not BUILD_PENDING.is_symlink(),
+                'Interrupted/active AWG build transaction; preserve state and recover explicitly')
         yield fd
         return
     fd = os.open(LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
         guard(LOCK, private=True)
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        require(not BUILD_PENDING.exists() and not BUILD_PENDING.is_symlink(),
+                'Interrupted/active AWG build transaction; preserve state and recover explicitly')
         yield fd
     finally:
         os.close(fd)
@@ -1090,6 +1097,7 @@ def stage_source(value, archive):
 
 def bounded_make(kernel):
     # Called only inside the systemd unit; the parent retains the module lock.
+    acknowledge_build_start(kernel)
     start = time.monotonic()
     headers = Path('/usr/src') / f'linux-headers-{kernel}'
     guard(headers, directory=True)
@@ -1130,6 +1138,125 @@ def dependency_build_scope():
     return ['--slice=' + slices[0]]
 
 
+def read_build_transaction(kernel):
+    guard(BUILD_PENDING, directory=True, private=True)
+    path = BUILD_PENDING / 'transaction.json'
+    guard(path, private=True)
+    value = json.loads(path.read_text())
+    require(isinstance(value, dict)
+            and set(value) == {'schema', 'unit', 'kernel', 'build', 'slice'}
+            and type(value['schema']) is int and value['schema'] == 1
+            and value['kernel'] == kernel
+            and isinstance(value['unit'], str)
+            and re.fullmatch(r'nook-awg-build-[0-9a-f]{32}', value['unit'])
+            and isinstance(value['build'], str) and Path(value['build']).is_absolute()
+            and isinstance(value['slice'], str)
+            and (value['slice'] == 'system.slice'
+                 or re.fullmatch(r'nook_awg_deps_[0-9a-f]{32}\.slice', value['slice'])),
+            'Malformed AWG build transaction')
+    return value
+
+
+def sync_build_directory():
+    guard(BUILD_PENDING, directory=True, private=True)
+    descriptor = os.open(BUILD_PENDING, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def acknowledge_build_start(kernel):
+    """Only the authenticated systemd worker may acknowledge the build start."""
+    try:
+        transaction = read_build_transaction(kernel)
+        require(Path.cwd() == Path(transaction['build']), 'AWG build directory changed')
+        expected = f"/{transaction['slice']}/{transaction['unit']}.service"
+        paths = [line.split(':', 2)[2] for line in Path('/proc/self/cgroup').read_text().splitlines()
+                 if line.startswith('0::')]
+        require(paths == [expected], 'AWG build is outside its owned service cgroup')
+        with (BUILD_PENDING / 'started.json').open('x') as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            json.dump(dict(unit=transaction['unit'], pid=os.getpid()), stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        sync_build_directory()
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        raise Refusal('Cannot acknowledge AWG build start; preserve transaction state') from error
+
+
+def run_build_transaction(kernel, build):
+    """Retain the caller's lock until the owned build has positively stopped."""
+    scope = dependency_build_scope()
+    slice_name = scope[0].removeprefix('--slice=') if scope else 'system.slice'
+    unit = 'nook-awg-build-' + secrets.token_hex(16)
+    transaction = dict(schema=1, unit=unit, kernel=kernel, build=str(build), slice=slice_name)
+    require(Path(build).is_absolute(), 'AWG build directory must be absolute')
+    # mkdir is exclusive, including against symlinks. Incomplete publication is
+    # intentionally retained: no launch is allowed before all durability barriers.
+    BUILD_PENDING.mkdir(mode=0o700)
+    with (BUILD_PENDING / 'transaction.json').open('x') as stream:
+        os.fchmod(stream.fileno(), 0o600)
+        json.dump(transaction, stream)
+        stream.flush()
+        os.fsync(stream.fileno())
+    sync_build_directory()
+    sync_state_directory()
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+
+    def cancelled(signum, frame):
+        raise Refusal('AWG build cancelled')
+
+    signal.signal(signal.SIGTERM, cancelled)
+    error = None
+    result = None
+    try:
+        try:
+            result = run(['systemd-run', '--quiet', '--wait', '--pipe', '--service-type=exec',
+                          f'--unit={unit}', f'--slice={slice_name}', f'--working-directory={build}',
+                          '-p', f'MemoryMax={BUILD_MEMORY}', '-p', 'MemorySwapMax=0',
+                          '-p', 'CPUQuota=100%', '-p', f'RuntimeMaxSec={BUILD_TIMEOUT}',
+                          '-p', 'KillMode=control-group', '-p', f'TimeoutStopSec={DEPENDENCY_STOP_TIMEOUT}',
+                          '-p', 'SendSIGKILL=yes', '-p', 'PrivateNetwork=yes',
+                          '/usr/bin/python3', str(OWNER), 'bounded-make', '--kernel', kernel],
+                         timeout=BUILD_TIMEOUT + COMMAND_TIMEOUT)
+        except BaseException as failure:
+            error = failure
+        for sig in previous:
+            signal.signal(sig, signal.SIG_IGN)
+        try:
+            # Successful transient services may already be garbage-collected.
+            # The acknowledgement and cgroup proof below decide termination.
+            run(['systemctl', 'stop', unit + '.service'], check=False,
+                timeout=DEPENDENCY_STOP_TIMEOUT + COMMAND_TIMEOUT)
+            acknowledgement = BUILD_PENDING / 'started.json'
+            guard(acknowledgement, private=True)
+            started = json.loads(acknowledgement.read_text())
+            require(isinstance(started, dict) and set(started) == {'unit', 'pid'}
+                    and started['unit'] == unit and type(started['pid']) is int and started['pid'] > 0,
+                    'Malformed AWG build start acknowledgement')
+            require(dependency_control_group_empty(unit + '.service', f'/{slice_name}/{unit}.service'),
+                    'AWG build service still populated')
+            require({path.name for path in BUILD_PENDING.iterdir()} == {'transaction.json', 'started.json'},
+                    'Unexpected AWG build transaction contents')
+            require(read_build_transaction(kernel) == transaction, 'AWG build transaction identity changed')
+            # Remove only our known records. Unknown contents prevent rmdir and
+            # preserve the fail-closed marker rather than being recursively erased.
+            acknowledgement.unlink()
+            (BUILD_PENDING / 'transaction.json').unlink()
+            BUILD_PENDING.rmdir()
+            sync_state_directory()
+        except Exception as failure:
+            raise Refusal(f'AWG build termination unconfirmed: {unit}; preserve {BUILD_PENDING} '
+                          'and recover explicitly') from (error if error is not None else failure)
+        if error is not None:
+            raise error
+        return result
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
 def compile_module(kernel):
     # During normal signed kernel updates dpkg owns its lock: authenticate newly
     # installed headers/tools read-only, before compiling, without nested installs.
@@ -1143,13 +1270,7 @@ def compile_module(kernel):
         verify_source(value)
         build = Path.cwd()
         require(str(build).startswith(f'/var/lib/dkms/{MODULE}/{DKMS_VERSION}/'), 'Unexpected DKMS build path')
-        result = run(['systemd-run', '--quiet', '--wait', '--pipe', '--collect',
-                      *dependency_build_scope(), f'--unit=nook-awg-build-{kernel}', f'--working-directory={build}',
-                      '-p', f'MemoryMax={BUILD_MEMORY}', '-p', 'MemorySwapMax=0',
-                      '-p', 'CPUQuota=100%', '-p', f'RuntimeMaxSec={BUILD_TIMEOUT}',
-                      '-p', 'KillMode=control-group', '-p', f'TimeoutStopSec={DEPENDENCY_STOP_TIMEOUT}',
-                      '-p', 'SendSIGKILL=yes', '-p', 'PrivateNetwork=yes', '/usr/bin/python3', str(OWNER), 'bounded-make',
-                      '--kernel', kernel], timeout=BUILD_TIMEOUT + COMMAND_TIMEOUT)
+        result = run_build_transaction(kernel, build)
         info = run(['modinfo', str(build / 'amneziawg.ko')]).stdout
         require('version:' in info and VERSION in info and kernel in info, 'Built module identity mismatch')
         source_version = re.search(r'^srcversion:\s+(\S+)$', info, re.M)

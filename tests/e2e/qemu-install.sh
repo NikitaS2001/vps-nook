@@ -650,6 +650,12 @@ verify_bootstrap_secret_free \
     "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519"
 echo "[E2E] wg-easy login and secret scrub verified"
 
+if [[ "${NOOK_VPN_BACKEND}" == awg ]]; then
+    echo "[E2E] Verifying standalone AWG build-service cancellation..."
+    run_remote "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
+        'sudo python3 /opt/vps-nook-installer/repo/tests/e2e/awg-build-cancellation.py /usr/local/lib/vps-nook/awg_module.py'
+fi
+
 if [[ "${DO_IDEMPOTENCY}" == true ]]; then
     echo "[E2E] Exercising interrupted initial setup before creating clients..."
     # Fresh installs copy as the cloud user. Retry source must belong to the

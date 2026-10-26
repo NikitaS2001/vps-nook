@@ -182,6 +182,13 @@ observer, guest unit, test container, peer and private credential artifacts.
 The source/packet contracts execute safe adapters and the native observer;
 they do not prove guest packets, cryptographic handshakes or sudo portability.
 
+AWG installer cases also run `awg-build-cancellation.py` inside the disposable
+guest. It uses the production build-transaction owner with an isolated state
+directory and a service containing a worker and child process. SIGTERM and
+SIGINT must stop both processes before releasing the lock or removing the
+transaction marker. This proves service cancellation, not a kernel upgrade.
+The normal installer still builds and verifies the actual AWG module.
+
 The Vaultwarden path proves real Compose health, private/no-port runtime through
 `manage.sh verify`, AdGuard DNS, WireGuard routing, the Caddy root CA, and a
 2xx/3xx response from `vw.<suffix>` after reboot and installer rerun. It does
