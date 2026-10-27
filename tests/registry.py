@@ -48,8 +48,8 @@ VMS = (
 
 # Fresh stock images; hashes verified before the guest starts.
 FRESH_IMAGES = {
-    "debian": ("https://cloud.debian.org/images/cloud/bookworm/daily/20261023-2640/debian-12-genericcloud-amd64-daily-20261023-2640.qcow2",
-               "dd7898c00b7ff1950d7bc1c45eb06dda626a42414de06fbb23934dfde39dc58d", "debian", "952"),
+    "debian": ("https://cloud.debian.org/images/cloud/bookworm/daily/20261026-2643/debian-12-genericcloud-amd64-daily-20261026-2643.qcow2",
+               "24036a8b79cbb11d809752c60f2f885b1a3b02b1d663faa0b648eb87bd7a256e", "debian", "952"),
     "ubuntu": ("https://cloud-images.ubuntu.com/noble/20260926/noble-server-cloudimg-amd64.img",
                "6a81c37564db9b1ee84e141922625e1d7c5b389b99bb3c572e0243607d5bb4d2", "ubuntu", "963"),
 }

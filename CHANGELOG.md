@@ -20,7 +20,7 @@ Notable changes are recorded here. The project follows Semantic Versioning.
 - Separate core QEMU checks from the Vaultwarden extension scenario, with independent CI results and an explicit release gate.
 - Recopy private installer source as the hardened administrator before bootstrap retry after SSH cutover.
 - Preserve the active guest resolver during WG and AWG client preparation, preventing Debian package setup from removing `systemd-resolved`.
-- Refresh the pinned Debian stock test image so AWG can authenticate its installed dependency versions without upgrading the guest.
+- Refresh the pinned Debian stock test image to `20261026-2643`, whose `libssl3` version remains available in signed distro archives. Preserve exact-version authentication without upgrading the guest.
 - Organize operator-owned service recipes under `examples/<service>/`, with a complete Vaultwarden installation and lifecycle guide.
 - Pin the Vaultwarden image by tag and OCI index digest, close registration by default, and validate the recipe in the quick gate.
 - Clarify shared Compose override merging and the extension backup allowlist.
