@@ -208,19 +208,23 @@ def cleanup_vms(registry, grace=30):
     """Use captured exact executable/root identity, never adopt a live process's exe."""
     from tests.qemu_owner import private_text
     registry = Path(registry)
-    records = {}
-    incomplete = set()
-    recovered = set()
     try:
         identity(registry)
-        for record in registry.glob("*.record"):
-            try:
-                records[record.stem] = validate_vm_entry(private_json(record), "running")
-            except (ValueError, KeyError, OwnerError):
-                incomplete.add(record.stem)
-        for intent in registry.glob("*.intent"):
-            if intent.stem in records:
-                continue
+        record_paths = list(registry.glob("*.record"))
+        intent_paths = list(registry.glob("*.intent"))
+    except (OwnerError, OSError, ValueError, KeyError, TypeError, OverflowError) as error:
+        raise CommandFailure(f"VM ownership cleanup incomplete: {error}") from error
+    records = {}
+    entry_errors = {}
+    for record in record_paths:
+        try:
+            records[record.stem] = validate_vm_entry(private_json(record), "running")
+        except (OwnerError, OSError, ValueError, KeyError, TypeError, OverflowError) as error:
+            entry_errors[record.stem] = error
+    for intent in intent_paths:
+        if intent.stem in records:
+            continue
+        try:
             value = validate_vm_entry(private_json(intent), "launching")
             try:
                 pid = private_text(Path(value["pidfile"]), expected_parent=value["pidfile_parent_identity"]).strip()
@@ -233,13 +237,17 @@ def cleanup_vms(registry, grace=30):
                 raise OwnerError("Startup QEMU identity missing; possible orphan")
             value.update(pid=pid, started=started)
             records[intent.stem] = value
-            recovered.add(intent.stem)
-        if incomplete - recovered:
-            raise OwnerError("Unmatched incomplete QEMU registry record; possible orphan")
-        for value in records.values():
+            entry_errors.pop(intent.stem, None)
+        except (OwnerError, OSError, ValueError, KeyError, TypeError, OverflowError) as error:
+            entry_errors[intent.stem] = error
+    errors = list(entry_errors.values())
+    for value in records.values():
+        try:
             terminate_owned(value["pid"], value["started"], value["disk"], executable=value["executable"], grace=grace)
-    except (OwnerError, OSError, ValueError, KeyError) as error:
-        raise CommandFailure(f"VM ownership cleanup incomplete: {error}") from error
+        except (OwnerError, OSError, ValueError, KeyError, TypeError, OverflowError) as error:
+            errors.append(error)
+    if errors:
+        raise CommandFailure("VM ownership cleanup incomplete: " + " | ".join(str(error) for error in errors)) from errors[0]
 
 
 def group_alive(pgid):

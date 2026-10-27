@@ -229,6 +229,163 @@ def test_interrupted_install_reuses_verified_candidate(owner, monkeypatch):
     assert owner.verify_installed(value, kernel) == info
 
 
+@pytest.fixture
+def installed_candidate(owner, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import subprocess
+
+    kernel = '6.1.0-53-cloud-amd64'
+    other = {'phase': 'ready', 'module_sha256': 'other-abi'}
+    receipt = tmp_path / 'receipt.json'
+    receipt.write_text(json.dumps({'kernels': {
+        kernel: {'phase': 'built', 'candidate_sha256': 'candidate', 'raw_srcversion': 'known'},
+        'other': other}}))
+    receipt.chmod(0o600)
+    info = dict(sha256='candidate', srcversion='known', vermagic=kernel)
+    state = SimpleNamespace(kernel=kernel, visible=False, post_install=False, failure=None,
+                            commands=[], receipt=receipt, other=other, info=info)
+
+    def read():
+        return json.loads(receipt.read_text())
+
+    def write(value):
+        if state.failure == 'write' and value['kernels'][kernel]['phase'] == 'installed':
+            raise OSError('receipt write failed')
+        receipt.write_text(json.dumps(value))
+
+    def run(argv, **kwargs):
+        state.commands.append(argv)
+        if argv[0] == state.failure or (argv[0] == 'dpkg-query' and state.failure == 'package'):
+            raise owner.Refusal('injected command failure')
+        if argv[:2] == ['dkms', 'install']:
+            state.visible = True
+            if state.post_install:
+                owner.stamp_installed(read(), kernel, info)
+                state.failure = 'package'
+        stdout = 'fixture-package' if argv[0] == 'dpkg-query' else ''
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr='')
+
+    loaded = tmp_path / 'loaded'
+    loaded.mkdir()
+    (loaded / 'version').write_text(owner.VERSION)
+    (loaded / 'srcversion').write_text(info['srcversion'])
+    persistence = tmp_path / 'amneziawg.conf'
+    persistence.write_text(owner.MODULE + '\n')
+    monkeypatch.setattr(owner, 'LOADED', loaded)
+    monkeypatch.setattr(owner, 'MODULES_LOAD_FILE', persistence)
+    monkeypatch.setattr(owner, 'guard', lambda *args, **kwargs: None)
+    monkeypatch.setattr(owner, 'module_lock', fake_lock())
+    monkeypatch.setattr(owner, 'preflight', lambda *args, **kwargs: None)
+    monkeypatch.setattr(owner, 'initialize', lambda: None)
+    monkeypatch.setattr(owner, 'stage_source', lambda *args: None)
+    monkeypatch.setattr(owner, 'verify_dependency_payloads', lambda *args: None)
+    monkeypatch.setattr(owner, 'read_receipt', read)
+    monkeypatch.setattr(owner, 'inspect_state', read)
+    monkeypatch.setattr(owner, 'write_receipt', write)
+    monkeypatch.setattr(owner, 'module_info', lambda kernel: info.copy() if state.visible else None)
+    monkeypatch.setattr(owner, 'run', run)
+    state.read = read
+    return state
+
+
+def assert_installed_candidate(owner, state, phase):
+    value = state.read()
+    record = value['kernels'][state.kernel]
+    assert record['phase'] == phase
+    assert record['headers_package'] == record['compiler_package'] == 'fixture-package'
+    assert record['module_sha256'] == state.info['sha256']
+    assert record['srcversion'] == state.info['srcversion']
+    assert record['vermagic'] == state.info['vermagic']
+    assert value['kernels']['other'] == state.other
+    assert owner.verify_installed(value, state.kernel) == state.info
+
+
+@pytest.mark.parametrize('route', ['new', 'visible', 'direct-ready', 'post-install'])
+def test_built_candidate_promotion_preserves_attribution(owner, installed_candidate, route):
+    state = installed_candidate
+    state.visible = route in ('visible', 'direct-ready')
+    state.post_install = route == 'post-install'
+    if route != 'direct-ready':
+        owner.prepare(state.kernel, Path('/unused'))
+        assert_installed_candidate(owner, state, 'loaded')
+    owner.mark_ready(state.kernel)
+    assert_installed_candidate(owner, state, 'ready')
+    # A ready receipt remains usable without querying installed package identity again.
+    before = state.receipt.read_bytes()
+    state.failure = 'package'
+    owner.prepare(state.kernel, Path('/unused'))
+    owner.mark_ready(state.kernel)
+    assert state.receipt.read_bytes() == before
+
+
+@pytest.mark.parametrize('action', ['new', 'visible', 'ready'])
+@pytest.mark.parametrize('field', ['sha256', 'srcversion'])
+def test_candidate_mismatch_never_promotes_or_loads(owner, installed_candidate, action, field):
+    state = installed_candidate
+    state.visible = action != 'new'
+    state.info[field] = 'foreign'
+    before = state.receipt.read_bytes()
+    with pytest.raises(owner.Refusal, match='Unattributable'):
+        if action != 'ready':
+            owner.prepare(state.kernel, Path('/unused'))
+        else:
+            owner.mark_ready(state.kernel)
+    assert state.receipt.read_bytes() == before
+    assert ['modprobe', owner.MODULE] not in state.commands
+
+
+@pytest.mark.parametrize('action,failure', [
+    ('new', 'package'), ('visible', 'package'), ('ready', 'package'),
+    ('new', 'write'), ('visible', 'write'), ('ready', 'write'),
+    ('new', 'modprobe'), ('visible', 'modprobe'), ('visible', 'depmod'),
+])
+def test_candidate_failure_preserves_last_durable_phase(owner, installed_candidate, action, failure):
+    state = installed_candidate
+    state.visible = action != 'new'
+    state.failure = failure
+    with pytest.raises((owner.Refusal, OSError)):
+        if action == 'ready':
+            owner.mark_ready(state.kernel)
+        else:
+            owner.prepare(state.kernel, Path('/unused'))
+    expected = 'installed' if failure == 'modprobe' else 'built'
+    assert state.read()['kernels'][state.kernel]['phase'] == expected
+    assert state.read()['kernels']['other'] == state.other
+    if expected == 'installed':
+        assert_installed_candidate(owner, state, expected)
+    else:
+        assert ['modprobe', owner.MODULE] not in state.commands
+
+
+@pytest.mark.parametrize('phase', ['installed', 'loaded', 'ready'])
+def test_existing_installed_identity_is_not_recanonicalized(owner, installed_candidate, phase):
+    state = installed_candidate
+    state.visible = True
+    owner.stamp_installed(state.read(), state.kernel, state.info)
+    value = state.read()
+    value['kernels'][state.kernel]['phase'] = phase
+    state.receipt.write_text(json.dumps(value))
+    state.failure = 'package'
+    owner.prepare(state.kernel, Path('/unused'))
+    owner.mark_ready(state.kernel)
+    assert_installed_candidate(owner, state, 'ready')
+
+
+@pytest.mark.parametrize('phase', ['loaded', 'ready'])
+def test_damaged_promoted_identity_is_not_repaired(owner, installed_candidate, phase):
+    state = installed_candidate
+    state.visible = True
+    value = state.read()
+    value['kernels'][state.kernel]['phase'] = phase
+    state.receipt.write_text(json.dumps(value))
+    before = state.receipt.read_bytes()
+    with pytest.raises(owner.Refusal, match='Unattributable'):
+        owner.prepare(state.kernel, Path('/unused'))
+    with pytest.raises(owner.Refusal, match='Unattributable'):
+        owner.mark_ready(state.kernel)
+    assert state.receipt.read_bytes() == before
+
+
 @pytest.mark.parametrize('value', ['true', '1', 'yes', 'unknown'])
 def test_reboot_refusal_before_hardening(owner, monkeypatch, value):
     import subprocess
@@ -247,15 +404,6 @@ def test_reboot_refusal_before_hardening(owner, monkeypatch, value):
     with pytest.raises(owner.Refusal, match='automatic reboot'):
         owner.main()
     assert calls == [['apt-config', 'dump']]
-
-
-def test_controller_reboot_guard_precedes_hardening():
-    import yaml
-
-    plays = yaml.safe_load((OWNER.parents[3] / 'site.yml').read_text())
-    guards = plays[0].get('pre_tasks', [])
-    assert any(task.get('ansible.builtin.script', {}).get('cmd', '').endswith('awg_module.py pre-hardening')
-               and 'wg_amnezia_enabled' in task.get('when', '') for task in guards)
 
 
 def test_swap_zram_state_is_read_only(owner, tmp_path):

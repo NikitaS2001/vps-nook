@@ -8,6 +8,9 @@ Notable changes are recorded here. The project follows Semantic Versioning.
 - Add installer backend choice and edit field 8. The `NOOK_VPN_BACKEND=wg|awg` input defaults to WG, independently of `services`/`full` routing.
 - Persist the canonical encrypted backend value. Legacy vaults remain WG. Reruns preserve saved vault/password bytes, accept matching backend input, and reject switches.
 - Prepare pinned AWG source through distro DKMS and exact running-kernel headers. Share preflight between the installer and the controller. Preserve rerun state. Reject unsupported kernels and unattended reboot. Reject enabled or unknown Secure Boot, module signature enforcement, or lockdown. Matching clients remain required.
+- Save verified AWG installed identity before promoting interrupted DKMS receipts to `loaded` or `ready`.
+- Run the early AWG guard from checkout paths containing spaces, preserving tagged execution and failure propagation.
+- Continue cleanup of independently verified VM processes after another registry entry fails. Retain the aggregate failure and unverified state.
 - Prevent SIGPIPE failures in the synthetic health check when many peers report handshake timestamps.
 - Execute the guest sudo/PTY wrapper by script path while preserving piped installer input and hidden password checks.
 - Run interrupted-first-setup checks before creating peers, preserving the initial administrator identity during bootstrap recovery.

@@ -1,6 +1,7 @@
 """Fault injection stays in tiny fixture suites, never recursively runs project checks."""
 import os
 from pathlib import Path
+import select
 import signal
 import shutil
 import subprocess
@@ -39,6 +40,40 @@ def write_vm_record(path, text):
     else:
         path.write_text(text)
         path.chmod(0o600)
+
+
+@pytest.fixture
+def vm_children(tmp_path):
+    registry = tmp_path / "registry"
+    registry.mkdir(mode=0o700)
+    executable = registry / "qemu-system-fixture"
+    shutil.copy2(sys.executable, executable)
+    children = []
+
+    def start(name):
+        directory = registry / name
+        directory.mkdir(mode=0o700)
+        (directory / "disk.qcow2").write_bytes(b"owned fixture disk\n")
+        child = subprocess.Popen([str(executable), "-u", "-c",
+                                  "import time; print('ready', flush=True); time.sleep(300)",
+                                  "-drive", f"file={directory}/disk.qcow2,if=virtio,format=qcow2"],
+                                 stdout=subprocess.PIPE, start_new_session=True)
+        children.append(child)
+        assert select.select([child.stdout], [], [], 5)[0], "fixture child readiness timeout"
+        assert child.stdout.readline() == b"ready\n"
+        write_vm_record(directory / "qemu.pid", str(child.pid))
+        record_path = registry / f"{name}.record"
+        write_vm_record(record_path, f"{child.pid}\n{process_identity(child.pid)}\n{directory}\n")
+        return directory, child, record_path
+
+    try:
+        yield registry, start
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()  # Only our own live, unreaped Popen children.
+            child.wait(timeout=5)
+            child.stdout.close()
 
 
 @pytest.fixture
@@ -158,6 +193,95 @@ def test_vm_recycled_pid_not_signalled(tmp_path):
         cleanup_vms(tmp_path, grace=0.1)
 
 
+@pytest.mark.parametrize("stale_first", [True, False], ids=["stale-first", "stale-last"])
+def test_vm_cleanup_continues_after_stale_record(vm_children, monkeypatch, stale_first):
+    from tests.qemu_owner import private_json, write_private_json
+
+    registry, start = vm_children
+    _, stale, stale_record = start("stale")
+    valid = [start("valid-one"), start("valid-two")]
+    value = private_json(stale_record)
+    value["started"] = str(int(value["started"]) + 1)
+    write_private_json(stale_record, value)
+    paths = [stale_record, *(record for _, _, record in valid)]
+    if not stale_first:
+        paths.reverse()
+    original_glob = Path.glob
+
+    def ordered_glob(path, pattern):
+        if path == registry and pattern == "*.record":
+            return iter(paths)
+        return original_glob(path, pattern)
+
+    monkeypatch.setattr(Path, "glob", ordered_glob)
+    with pytest.raises(CommandFailure, match="start time") as failure:
+        cleanup_vms(registry, grace=0.1)
+    assert failure.value.__cause__ is not None
+    assert stale.poll() is None
+    for directory, child, record in valid:
+        assert child.wait(timeout=5) == -signal.SIGTERM
+        assert directory.exists() and record.exists()
+    assert stale_record.exists()
+
+
+@pytest.mark.parametrize("kind", ["record", "intent"])
+@pytest.mark.parametrize("malformed", ["truncated", "null-directory"])
+def test_vm_cleanup_continues_after_invalid_entry(vm_children, kind, malformed):
+    from tests.qemu_owner import private_json, write_private_json
+
+    registry, start = vm_children
+    directory, child, record = start("valid")
+    bad_path = registry / f"invalid.{kind}"
+    if malformed == "truncated":
+        write_vm_record(bad_path, '{"schema":')
+    else:
+        value = private_json(record)
+        if kind == "intent":
+            value["phase"] = "launching"
+            del value["pid"]
+            del value["started"]
+        value["directory"] = None
+        write_private_json(bad_path, value)
+    before = bad_path.read_bytes()
+    with pytest.raises(CommandFailure, match="VM ownership cleanup incomplete"):
+        cleanup_vms(registry, grace=0.1)
+    assert child.wait(timeout=5) == -signal.SIGTERM
+    assert bad_path.read_bytes() == before
+    assert directory.exists() and record.exists()
+
+
+def test_vm_cleanup_rejects_unsafe_registry_before_signals(vm_children):
+    registry, start = vm_children
+    children = [start("one")[1], start("two")[1]]
+    registry.chmod(0o755)
+    try:
+        with pytest.raises(CommandFailure, match="private real directory"):
+            cleanup_vms(registry, grace=0.1)
+        assert all(child.poll() is None for child in children)
+    finally:
+        registry.chmod(0o700)
+
+
+def test_vm_cleanup_lists_registry_before_reading_entries(vm_children, monkeypatch):
+    registry, start = vm_children
+    _, child, _ = start("valid")
+    original_glob = Path.glob
+
+    def failed_intents(path, pattern):
+        if path == registry and pattern == "*.intent":
+            raise OSError("fixture registry listing failure")
+        return original_glob(path, pattern)
+
+    def unexpected_read(*args):
+        pytest.fail("entry read before all root registry checks completed")
+
+    monkeypatch.setattr(Path, "glob", failed_intents)
+    monkeypatch.setattr("tests.support.private_json", unexpected_read)
+    with pytest.raises(CommandFailure, match="registry listing failure"):
+        cleanup_vms(registry, grace=0.1)
+    assert child.poll() is None
+
+
 def test_vm_wrong_ownership_rejected(tmp_path):
     write_vm_record(tmp_path / "test.record", f"{os.getpid()}\n{process_identity(os.getpid())}\n{tmp_path}\n")
     with pytest.raises(CommandFailure, match="ownership"):
@@ -166,27 +290,17 @@ def test_vm_wrong_ownership_rejected(tmp_path):
 
 @pytest.mark.parametrize("record", ["", "partial\n", "partial\nrecord\n"],
                          ids=["empty", "one-line", "two-line"])
-def test_incomplete_vm_record_uses_valid_intent(tmp_path, record):
-    executable = tmp_path / "qemu-system-fixture"
-    shutil.copy2(sys.executable, executable)
-    directory = tmp_path / "vm"
-    directory.mkdir()
-    child = subprocess.Popen([str(executable), "-c",
-                              "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(300)",
-                              "-drive", f"file={directory}/disk.qcow2"], start_new_session=True)
-    try:
-        time.sleep(0.1)
-        started = process_identity(child.pid)
-        pidfile = tmp_path / "vm.pid"
-        write_vm_record(pidfile, str(child.pid))
-        write_vm_record(tmp_path / "vm.intent", f"{pidfile}\n{started}\n{directory}\n")
-        write_vm_record(tmp_path / "vm.record", record)
-        cleanup_vms(tmp_path, grace=0.1)
-        assert child.wait(timeout=5) == -signal.SIGKILL
-    finally:
-        if child.poll() is None:
-            child.kill()
-            child.wait()
+def test_incomplete_vm_record_uses_valid_intent(vm_children, record):
+    registry, start = vm_children
+    directory, child, record_path = start("recover")
+    _, other, _ = start("other")
+    intent = registry / "recover.intent"
+    write_vm_record(intent, f"{directory / 'qemu.pid'}\n{process_identity(child.pid)}\n{directory}\n")
+    write_vm_record(record_path, record)
+    cleanup_vms(registry, grace=0.1)
+    assert child.wait(timeout=5) == -signal.SIGTERM
+    assert other.wait(timeout=5) == -signal.SIGTERM
+    assert record_path.exists() and intent.exists()
 
 
 @pytest.mark.parametrize("race_stage", ["cmdline", "sigterm"])

@@ -5,7 +5,7 @@
   pre_tasks:
     - name: "AmneziaWG | Preflight | Refuse unsafe boot policy before hardening"
       ansible.builtin.script:
-        cmd: "{{ playbook_dir }}/roles/vps_orchestration/files/awg_module.py pre-hardening"
+        cmd: "{{ (playbook_dir ~ '/roles/vps_orchestration/files/awg_module.py') | quote }} pre-hardening"
       changed_when: false
       when: wg_amnezia_enabled | default(false) | bool
       tags: [always]

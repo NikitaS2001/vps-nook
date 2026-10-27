@@ -1332,6 +1332,8 @@ def mark_ready(kernel):
         require((LOADED / 'version').read_text().strip() == VERSION
                 and (LOADED / 'srcversion').read_text().strip() == info['srcversion'],
                 'Loaded AWG identity mismatch')
+        if value['kernels'][kernel]['phase'] == 'built':
+            stamp_installed(value, kernel, info)
         changed = value['kernels'][kernel]['phase'] != 'ready'
         if changed:
             value['kernels'][kernel]['phase'] = 'ready'
@@ -1353,7 +1355,6 @@ def prepare(kernel, archive):
             verify_installed(value, kernel)
             if value['kernels'][kernel]['phase'] == 'built':
                 run(['depmod', '-a', kernel])
-                stamp_installed(value, kernel, info)
         else:
             env = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C.UTF-8', LOCK_ENV: str(fd)}
             status = run(['dkms', 'status', '-m', MODULE, '-v', DKMS_VERSION]).stdout.strip()
@@ -1366,6 +1367,8 @@ def prepare(kernel, archive):
                 timeout=BUILD_TIMEOUT + COMMAND_TIMEOUT, pass_fds=(fd,), env=env)
             value = read_receipt()
             info = verify_installed(value, kernel)
+        if value['kernels'][kernel]['phase'] == 'built':
+            stamp_installed(value, kernel, info)
         run(['modprobe', MODULE])
         loaded = LOADED
         require((loaded / 'version').read_text().strip() == VERSION
