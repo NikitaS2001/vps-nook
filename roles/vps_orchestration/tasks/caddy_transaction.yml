@@ -139,6 +139,13 @@
       failed_when: false
       no_log: true
 
+    - name: "Compose | Caddy | Preserve redacted validation failure"
+      ansible.builtin.set_fact:
+        vps_orchestration_caddy_primary_task: "Compose | Caddy | Validate complete candidate tree"
+        vps_orchestration_caddy_primary_rc: "{{ vps_orchestration_caddy_validation.rc }}"
+      when: vps_orchestration_caddy_validation.rc != 0
+      no_log: true
+
     - name: "Compose | Caddy | Reject invalid candidate"
       ansible.builtin.fail:
         msg: "Caddy candidate validation failed; active configuration was not changed"
@@ -251,6 +258,12 @@
             mode: '0600'
 
       rescue:
+        - name: "Compose | Rollback | Preserve redacted activation failure"
+          ansible.builtin.set_fact:
+            vps_orchestration_caddy_primary_task: "{{ ansible_failed_task.name }}"
+            vps_orchestration_caddy_primary_rc: "{{ ansible_failed_result.rc | default('unavailable') }}"
+          no_log: true
+
         - name: "Compose | Rollback | Restore prior managed file in place"
           ansible.builtin.command:
             argv:

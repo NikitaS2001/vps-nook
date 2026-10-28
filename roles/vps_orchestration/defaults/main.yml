@@ -25,6 +25,19 @@ wg_services_only_ipv6_destinations:
   - "{{ wg_vpn_ipv6_subnet }}"
 vps_orchestration_traffic_mode_readiness_retries: 30
 
+# AmneziaWG. The wg-easy image ships awg/awg-quick matching this kernel
+# module release. The role prepares pinned source through distro DKMS and exact
+# running-kernel headers. Unsupported kernels/signing and automatic reboot fail
+# shared preflight. No /lib/modules mount or userspace fallback is enabled.
+wg_amnezia_enabled: false
+wg_amnezia_kernel_module: "amneziawg"
+wg_amnezia_overrided_executable: "awg"
+# Query executable for live interface checks: plain WireGuard reports "Not
+# supported" for an AmneziaWG interface, so verification must use the same
+# tool that owns the interface.
+vps_orchestration_wg_executable: >-
+  {{ wg_amnezia_overrided_executable if wg_amnezia_enabled | bool else 'wg' }}
+
 # wg-easy initial setup (Unattended Setup via INIT_* env vars, first start only)
 wg_easy_admin_user: admin
 wg_public_host: ""

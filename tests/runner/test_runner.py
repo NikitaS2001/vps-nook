@@ -1,10 +1,13 @@
 """Fault injection stays in tiny fixture suites, never recursively runs project checks."""
 import os
 from pathlib import Path
+import select
 import signal
+import shutil
 import subprocess
 import sys
 import time
+from unittest.mock import Mock
 
 import pytest
 
@@ -13,6 +16,64 @@ from tests.support import CommandFailure, cleanup_vms, process_identity, run, sn
 from tests.contracts.test_tools import tool_argv
 
 pytestmark = pytest.mark.quick
+
+
+def write_vm_record(path, text):
+    from tests.qemu_owner import identity, write_private_json
+    fields = text.splitlines()
+    if path.suffix in (".record", ".intent") and len(fields) == 3:
+        first, started, directory = fields
+        directory = Path(directory)
+        executable = path.parent / "qemu-system-fixture"
+        if not executable.exists():
+            executable = Path("/usr/bin/qemu-system-x86_64")
+        value = {"schema": 1, "phase": "running" if path.suffix == ".record" else "launching",
+                 "directory": str(directory), "disk": str(directory / "disk.qcow2"),
+                 "executable": str(executable),
+                 "identity": identity(directory) if directory.exists() else [0, 0, os.geteuid(), 0o700]}
+        if path.suffix == ".record":
+            value.update(pid=int(first), started=started, pidfile=str(directory / "qemu.pid"), earliest=0,
+                         pidfile_parent_identity=value["identity"])
+        else:
+            value.update(pidfile=first, earliest=int(started), pidfile_parent_identity=identity(Path(first).parent))
+        write_private_json(path, value)
+    else:
+        path.write_text(text)
+        path.chmod(0o600)
+
+
+@pytest.fixture
+def vm_children(tmp_path):
+    registry = tmp_path / "registry"
+    registry.mkdir(mode=0o700)
+    executable = registry / "qemu-system-fixture"
+    shutil.copy2(sys.executable, executable)
+    children = []
+
+    def start(name):
+        directory = registry / name
+        directory.mkdir(mode=0o700)
+        (directory / "disk.qcow2").write_bytes(b"owned fixture disk\n")
+        child = subprocess.Popen([str(executable), "-u", "-c",
+                                  "import time; print('ready', flush=True); time.sleep(300)",
+                                  "-drive", f"file={directory}/disk.qcow2,if=virtio,format=qcow2"],
+                                 stdout=subprocess.PIPE, start_new_session=True)
+        children.append(child)
+        assert select.select([child.stdout], [], [], 5)[0], "fixture child readiness timeout"
+        assert child.stdout.readline() == b"ready\n"
+        write_vm_record(directory / "qemu.pid", str(child.pid))
+        record_path = registry / f"{name}.record"
+        write_vm_record(record_path, f"{child.pid}\n{process_identity(child.pid)}\n{directory}\n")
+        return directory, child, record_path
+
+    try:
+        yield registry, start
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()  # Only our own live, unreaped Popen children.
+            child.wait(timeout=5)
+            child.stdout.close()
 
 
 @pytest.fixture
@@ -36,7 +97,7 @@ if sys.argv[3] == os.environ.get('FAIL_STAGE'):
 
 
 @pytest.mark.parametrize("option,stages", [(None, ["quick"]), ("--e2e", ["quick", "qemu"]),
-                                           ("--release", ["quick", "qemu", "lifecycle", "release and not quick"])])
+                                           ("--release", ["quick", "qemu", "extension", "lifecycle", "release and not quick"])])
 def test_wrapper_selection(wrapper, option, stages):
     import ast
     entry, env = wrapper
@@ -47,7 +108,7 @@ def test_wrapper_selection(wrapper, option, stages):
     assert calls == [["-x", "-m", stage] for stage in stages]
 
 
-@pytest.mark.parametrize("stage", ["quick", "qemu", "lifecycle", "release and not quick"])
+@pytest.mark.parametrize("stage", ["quick", "qemu", "extension", "lifecycle", "release and not quick"])
 def test_wrapper_failure(wrapper, stage):
     entry, env = wrapper
     result = subprocess.run(["bash", str(entry), "--release"], env={**env, "FAIL_STAGE": stage},
@@ -75,7 +136,8 @@ def test_bootstrap_help(source_root, tmp_path):
     assert not result.stderr and not (tmp_path / ".venv").exists()
 
 
-@pytest.mark.parametrize("mutation", ["missing", "duplicate", "renamed", "vm"])
+@pytest.mark.parametrize("mutation", ["missing", "duplicate", "renamed", "vm", "extension-missing",
+                                     "extension-in-core", "extension-core-marker", "extension-disabled"])
 def test_registry_rejects_loss(source_root, mutation):
     from dataclasses import replace
     contracts, vms = CONTRACTS, VMS
@@ -85,6 +147,16 @@ def test_registry_rejects_loss(source_root, mutation):
         contracts = (*contracts, contracts[0])
     elif mutation == "renamed":
         contracts = (replace(contracts[0], argv=("bash", "tests/validation/renamed.sh")), *contracts[1:])
+    elif mutation == "extension-missing":
+        vms = tuple(case for case in vms if case.id != "extension-vaultwarden")
+    elif mutation == "extension-in-core":
+        vms = tuple(replace(case, argv=(*case.argv, "--vaultwarden-test")) if case.id == "qemu-services" else case
+                    for case in vms)
+    elif mutation == "extension-core-marker":
+        vms = tuple(replace(case, marks=("qemu",)) if case.id == "extension-vaultwarden" else case for case in vms)
+    elif mutation == "extension-disabled":
+        vms = tuple(replace(case, argv=tuple(arg for arg in case.argv if arg != "--vaultwarden-test"))
+                    if case.id == "extension-vaultwarden" else case for case in vms)
     else:
         vms = vms[:-1]
     with pytest.raises(ValueError):
@@ -115,80 +187,158 @@ def test_timeout_kills_children(tmp_path):
 
 
 def test_vm_recycled_pid_not_signalled(tmp_path):
-    (tmp_path / "test.record").write_text(f"{os.getpid()}\nwrong-start-time\n{tmp_path}\n")
-    cleanup_vms(tmp_path, grace=0.1)
+    started = int(process_identity(os.getpid())) + 1
+    write_vm_record(tmp_path / "test.record", f"{os.getpid()}\n{started}\n{tmp_path}\n")
+    with pytest.raises(CommandFailure, match="start time"):
+        cleanup_vms(tmp_path, grace=0.1)
+
+
+@pytest.mark.parametrize("stale_first", [True, False], ids=["stale-first", "stale-last"])
+def test_vm_cleanup_continues_after_stale_record(vm_children, monkeypatch, stale_first):
+    from tests.qemu_owner import private_json, write_private_json
+
+    registry, start = vm_children
+    _, stale, stale_record = start("stale")
+    valid = [start("valid-one"), start("valid-two")]
+    value = private_json(stale_record)
+    value["started"] = str(int(value["started"]) + 1)
+    write_private_json(stale_record, value)
+    paths = [stale_record, *(record for _, _, record in valid)]
+    if not stale_first:
+        paths.reverse()
+    original_glob = Path.glob
+
+    def ordered_glob(path, pattern):
+        if path == registry and pattern == "*.record":
+            return iter(paths)
+        return original_glob(path, pattern)
+
+    monkeypatch.setattr(Path, "glob", ordered_glob)
+    with pytest.raises(CommandFailure, match="start time") as failure:
+        cleanup_vms(registry, grace=0.1)
+    assert failure.value.__cause__ is not None
+    assert stale.poll() is None
+    for directory, child, record in valid:
+        assert child.wait(timeout=5) == -signal.SIGTERM
+        assert directory.exists() and record.exists()
+    assert stale_record.exists()
+
+
+@pytest.mark.parametrize("kind", ["record", "intent"])
+@pytest.mark.parametrize("malformed", ["truncated", "null-directory"])
+def test_vm_cleanup_continues_after_invalid_entry(vm_children, kind, malformed):
+    from tests.qemu_owner import private_json, write_private_json
+
+    registry, start = vm_children
+    directory, child, record = start("valid")
+    bad_path = registry / f"invalid.{kind}"
+    if malformed == "truncated":
+        write_vm_record(bad_path, '{"schema":')
+    else:
+        value = private_json(record)
+        if kind == "intent":
+            value["phase"] = "launching"
+            del value["pid"]
+            del value["started"]
+        value["directory"] = None
+        write_private_json(bad_path, value)
+    before = bad_path.read_bytes()
+    with pytest.raises(CommandFailure, match="VM ownership cleanup incomplete"):
+        cleanup_vms(registry, grace=0.1)
+    assert child.wait(timeout=5) == -signal.SIGTERM
+    assert bad_path.read_bytes() == before
+    assert directory.exists() and record.exists()
+
+
+def test_vm_cleanup_rejects_unsafe_registry_before_signals(vm_children):
+    registry, start = vm_children
+    children = [start("one")[1], start("two")[1]]
+    registry.chmod(0o755)
+    try:
+        with pytest.raises(CommandFailure, match="private real directory"):
+            cleanup_vms(registry, grace=0.1)
+        assert all(child.poll() is None for child in children)
+    finally:
+        registry.chmod(0o700)
+
+
+def test_vm_cleanup_lists_registry_before_reading_entries(vm_children, monkeypatch):
+    registry, start = vm_children
+    _, child, _ = start("valid")
+    original_glob = Path.glob
+
+    def failed_intents(path, pattern):
+        if path == registry and pattern == "*.intent":
+            raise OSError("fixture registry listing failure")
+        return original_glob(path, pattern)
+
+    def unexpected_read(*args):
+        pytest.fail("entry read before all root registry checks completed")
+
+    monkeypatch.setattr(Path, "glob", failed_intents)
+    monkeypatch.setattr("tests.support.private_json", unexpected_read)
+    with pytest.raises(CommandFailure, match="registry listing failure"):
+        cleanup_vms(registry, grace=0.1)
+    assert child.poll() is None
 
 
 def test_vm_wrong_ownership_rejected(tmp_path):
-    (tmp_path / "test.record").write_text(f"{os.getpid()}\n{process_identity(os.getpid())}\n{tmp_path}\n")
+    write_vm_record(tmp_path / "test.record", f"{os.getpid()}\n{process_identity(os.getpid())}\n{tmp_path}\n")
     with pytest.raises(CommandFailure, match="ownership"):
         cleanup_vms(tmp_path, grace=0.1)
 
 
 @pytest.mark.parametrize("record", ["", "partial\n", "partial\nrecord\n"],
                          ids=["empty", "one-line", "two-line"])
-def test_incomplete_vm_record_uses_valid_intent(tmp_path, record):
-    executable = tmp_path / "qemu-system-fixture"
-    executable.symlink_to(sys.executable)
-    directory = tmp_path / "vm"
-    directory.mkdir()
-    child = subprocess.Popen([str(executable), "-c",
-                              "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(300)",
-                              f"file={directory}/disk.qcow2"], start_new_session=True)
-    try:
-        time.sleep(0.1)
-        started = process_identity(child.pid)
-        pidfile = tmp_path / "vm.pid"
-        pidfile.write_text(str(child.pid))
-        (tmp_path / "vm.intent").write_text(f"{pidfile}\n{started}\n{directory}\n")
-        (tmp_path / "vm.record").write_text(record)
-        cleanup_vms(tmp_path, grace=0.1)
-        assert child.wait(timeout=5) == -signal.SIGKILL
-    finally:
-        if child.poll() is None:
-            child.kill()
-            child.wait()
+def test_incomplete_vm_record_uses_valid_intent(vm_children, record):
+    registry, start = vm_children
+    directory, child, record_path = start("recover")
+    _, other, _ = start("other")
+    intent = registry / "recover.intent"
+    write_vm_record(intent, f"{directory / 'qemu.pid'}\n{process_identity(child.pid)}\n{directory}\n")
+    write_vm_record(record_path, record)
+    cleanup_vms(registry, grace=0.1)
+    assert child.wait(timeout=5) == -signal.SIGTERM
+    assert other.wait(timeout=5) == -signal.SIGTERM
+    assert record_path.exists() and intent.exists()
 
 
 @pytest.mark.parametrize("race_stage", ["cmdline", "sigterm"])
 def test_vm_exit_race_during_cleanup(tmp_path, monkeypatch, race_stage):
-    import tests.support as support
+    import tests.qemu_owner as owner
 
     executable = tmp_path / "qemu-system-fixture"
-    executable.symlink_to(sys.executable)
+    shutil.copy2(sys.executable, executable)
     directory = tmp_path / "vm"
     directory.mkdir()
     child = subprocess.Popen([str(executable), "-c", "import time; time.sleep(300)",
-                              f"file={directory}/disk.qcow2"], start_new_session=True)
+                              "-drive", f"file={directory}/disk.qcow2"], start_new_session=True)
     try:
         started = process_identity(child.pid)
-        (tmp_path / "vm.record").write_text(f"{child.pid}\n{started}\n{directory}\n")
+        write_vm_record(tmp_path / "vm.record", f"{child.pid}\n{started}\n{directory}\n")
         if race_stage == "cmdline":
-            original_identity = support.process_identity
+            original_snapshot = owner.snapshot
             checked = False
 
-            def process_identity_after_exit(pid):
+            def snapshot_after_exit(pid):
                 nonlocal checked
-                value = original_identity(pid)
-                if pid == child.pid and value == started and not checked:
+                value = original_snapshot(pid)
+                if pid == child.pid and value is not None and not checked:
                     checked = True
                     child.terminate()
                     child.wait(timeout=5)
-                    return started
                 return value
 
-            monkeypatch.setattr(support, "process_identity", process_identity_after_exit)
+            monkeypatch.setattr(owner, "snapshot", snapshot_after_exit)
         else:
-            original_kill = support.os.kill
+            original_signal = owner.signal.pidfd_send_signal
 
-            def signal_after_exit(pid, sig):
-                if pid == child.pid and sig == signal.SIGTERM:
-                    original_kill(child.pid, sig)
-                    child.wait(timeout=5)
-                    raise ProcessLookupError
-                return original_kill(pid, sig)
+            def signal_after_exit(descriptor, sig):
+                original_signal(descriptor, sig)
+                child.wait(timeout=5)
+                raise ProcessLookupError
 
-            monkeypatch.setattr(support.os, "kill", signal_after_exit)
+            monkeypatch.setattr(owner.signal, "pidfd_send_signal", signal_after_exit)
         cleanup_vms(tmp_path, grace=0.1)
         assert child.poll() is not None
     finally:
@@ -433,19 +583,19 @@ def test_daemonized_vm_cleanup_after_state_removed(tmp_path, record_kind):
     # A process with a QEMU-shaped argv is sufficient to prove ownership checks;
     # real KVM behavior belongs to test_vm.
     executable = tmp_path / "qemu-system-fixture"
-    executable.symlink_to(sys.executable)
+    shutil.copy2(sys.executable, executable)
     directory = tmp_path / "deleted-vm"
     directory.mkdir()
     child = subprocess.Popen([str(executable), "-c", "import time; time.sleep(300)",
-                              f"file={directory}/disk.qcow2"], start_new_session=True)
+                              "-drive", f"file={directory}/disk.qcow2"], start_new_session=True)
     try:
         started = process_identity(child.pid)
         if record_kind == "record":
-            (tmp_path / "vm.record").write_text(f"{child.pid}\n{started}\n{directory}\n")
+            write_vm_record(tmp_path / "vm.record", f"{child.pid}\n{started}\n{directory}\n")
         else:
             pidfile = tmp_path / "vm.pid"
-            pidfile.write_text(str(child.pid))
-            (tmp_path / "vm.intent").write_text(f"{pidfile}\n{started}\n{directory}\n")
+            write_vm_record(pidfile, str(child.pid))
+            write_vm_record(tmp_path / "vm.intent", f"{pidfile}\n{started}\n{directory}\n")
         directory.rmdir()
         cleanup_vms(tmp_path, grace=1)
         assert child.wait(timeout=5) == -signal.SIGTERM
@@ -514,8 +664,16 @@ def test_stage_summary_does_not_forward_log(tmp_path):
 
 
 def test_clean_vm_may_remove_pidfile(tmp_path):
-    (tmp_path / "vm.intent").write_text(f"{tmp_path}/removed.pid\n0\n{tmp_path}/removed-state\n")
+    directory = tmp_path / "removed-state"
+    write_vm_record(tmp_path / "vm.intent", f"{tmp_path}/removed.pid\n0\n{directory}\n")
+    write_vm_record(tmp_path / "vm.record", f"1073741824\n1\n{directory}\n")
     cleanup_vms(tmp_path, grace=0.1)
+
+
+def test_unrecorded_startup_missing_pidfile_is_incomplete(tmp_path):
+    write_vm_record(tmp_path / "vm.intent", f"{tmp_path}/missing.pid\n0\n{tmp_path}/state\n")
+    with pytest.raises(CommandFailure, match="possible orphan"):
+        cleanup_vms(tmp_path, grace=0.1)
 
 
 def test_incomplete_cleanup_is_a_failure(tmp_path, monkeypatch):
@@ -529,12 +687,16 @@ def test_incomplete_cleanup_is_a_failure(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("status", [0, 23], ids=["success", "installer-failure"])
 def test_qemu_installer_preserves_status_in_conditional(source_root, tmp_path, status):
+    common = (source_root / "tests/e2e/common.sh").read_text()
+    vpn_start = common.index("vpn_executable() {\n")
+    vpn_function = common[vpn_start:common.index("\n}\n", vpn_start) + 3]
     source = (source_root / "tests/e2e/qemu-install.sh").read_text()
     start = source.index("run_repository_installer() {")
     function = source[start:source.index("\n}\n", start) + 3]
     fixture = tmp_path / "status.sh"
     fixture.write_text('''set -euo pipefail
 TMP_DIR="$1"
+NOOK_VPN_BACKEND=wg
 E2E_SOURCE_MODE=development
 INSTALL_REF=fixture
 ADMIN_PASS=fixture ADGUARD_PASS=fixture WG_PASS=fixture PUBKEY=fixture
@@ -543,7 +705,7 @@ INTERNAL_DOMAIN_SUFFIX=internal WG_INTERNAL_DOMAIN=wg.internal ADGUARD_INTERNAL_
 build_installer_credential_env() { :; }
 run_remote() { echo 'NON-PRODUCTION DEVELOPMENT MODE'; return STATUS; }
 fail() { exit 97; }
-'''.replace("STATUS", str(status)) + function + '''
+'''.replace("STATUS", str(status)) + vpn_function + function + '''
 if run_repository_installer fixture 22 fixture; then
     exit 0
 else
@@ -568,14 +730,104 @@ def test_provenance(command, tmp_path):
     assert "FAKE-PROVENANCE-SECRET" not in result.stdout + result.stderr + report
 
 
-def test_vm_gate_flags_are_preserved():
-    gates = {case.id: set(case.argv[2:]) for case in VMS}
-    assert gates["qemu-services"] == {"--client-test", "--idempotency-test", "--reboot-test",
-                                       "--bootstrap-timeout-test", "--stopped-container-test", "--invalid-caddy-test",
-                                       "--vaultwarden-test"}
-    assert gates["remote-ssh"] == {"--ssh-rollback-test", "--ssh-cutover-test", "--reboot-test",
-                                   "--ufw-backend-failure-test"}
-    assert gates["lifecycle-upgrade-restore"] == set()
+@pytest.fixture
+def vpn_dispatch(monkeypatch, tmp_path):
+    import tests.e2e.test_vm as vm
+
+    monkeypatch.setattr(vm.shutil, "which", Mock(return_value="/fixture/tool"))
+    monkeypatch.setattr(vm.os, "access", Mock(return_value=True))
+    return vm, Mock(), tmp_path
+
+
+@pytest.mark.parametrize("selection", [
+    (backend, traffic, expected)
+    for backend in ("wg", "awg")
+    for traffic, expected in ((None, "services"), ("", "services"), ("services", "services"), ("full", "full"))
+])
+def test_vpn_dispatch_preserves_services_selection(vpn_dispatch, monkeypatch, selection):
+    # Given a selected backend and an independent routing choice.
+    vm, command, root = vpn_dispatch
+    backend, traffic, expected = selection
+    monkeypatch.setenv("NOOK_VPN_BACKEND", backend)
+    if traffic is None:
+        monkeypatch.delenv("NOOK_WG_TRAFFIC_MODE", raising=False)
+    else:
+        monkeypatch.setenv("NOOK_WG_TRAFFIC_MODE", traffic)
+    case = next(case for case in VMS if case.id == "qemu-services")
+
+    # When the actual pytest VM owner dispatches the registered case.
+    vm.test_vm(case, root, command)
+
+    # Then the real harness receives the requested backend and routing.
+    command.assert_called_once_with(case.argv, cwd=root, timeout=case.timeout,
+                                    env={"NOOK_WG_TRAFFIC_MODE": expected, "NOOK_VPN_BACKEND": backend})
+
+
+@pytest.mark.parametrize("backend", [None, ""])
+def test_vpn_dispatch_defaults_backend(vpn_dispatch, monkeypatch, backend):
+    vm, command, root = vpn_dispatch
+    monkeypatch.delenv("NOOK_WG_TRAFFIC_MODE", raising=False)
+    if backend is None:
+        monkeypatch.delenv("NOOK_VPN_BACKEND", raising=False)
+    else:
+        monkeypatch.setenv("NOOK_VPN_BACKEND", backend)
+    case = next(case for case in VMS if case.id == "qemu-services")
+
+    vm.test_vm(case, root, command)
+
+    assert command.call_args.kwargs["env"] == {"NOOK_WG_TRAFFIC_MODE": "services", "NOOK_VPN_BACKEND": "wg"}
+
+
+@pytest.mark.parametrize("traffic", ["bogus", "full; exit 0"])
+def test_vpn_dispatch_rejects_invalid_before_preparation(vpn_dispatch, monkeypatch, traffic):
+    vm, command, root = vpn_dispatch
+    monkeypatch.setenv("NOOK_WG_TRAFFIC_MODE", traffic)
+    vm.shutil.which.reset_mock()
+    vm.os.access.reset_mock()
+    case = next(case for case in VMS if case.id == "qemu-services")
+
+    with pytest.raises(CommandFailure):
+        vm.test_vm(case, root, command)
+
+    command.assert_not_called()
+    vm.shutil.which.assert_not_called()
+    vm.os.access.assert_not_called()
+
+
+@pytest.mark.parametrize("case", [case for case in VMS if case.id != "qemu-services" and not case.env], ids=lambda case: case.id)
+def test_vpn_dispatch_other_vm_defaults_unchanged(vpn_dispatch, monkeypatch, case):
+    vm, command, root = vpn_dispatch
+    monkeypatch.setenv("NOOK_WG_TRAFFIC_MODE", "full")
+    monkeypatch.setenv("NOOK_VPN_BACKEND", "awg")
+
+    vm.test_vm(case, root, command)
+
+    command.assert_called_once_with(case.argv, cwd=root, timeout=case.timeout, env={"NOOK_WG_TRAFFIC_MODE": "services"})
+
+
+def test_vpn_dispatch_propagates_harness_failure(vpn_dispatch, monkeypatch):
+    vm, command, root = vpn_dispatch
+    monkeypatch.setenv("NOOK_WG_TRAFFIC_MODE", "full")
+    failure = CommandFailure("fixture harness exit 23")
+    command.side_effect = failure
+    case = next(case for case in VMS if case.id == "qemu-services")
+
+    with pytest.raises(CommandFailure) as caught:
+        vm.test_vm(case, root, command)
+
+    assert caught.value is failure
+
+
+def test_vpn_dispatch_missing_prerequisite_fails(vpn_dispatch, monkeypatch):
+    vm, command, root = vpn_dispatch
+    monkeypatch.setenv("NOOK_WG_TRAFFIC_MODE", "services")
+    vm.shutil.which.return_value = None
+    case = next(case for case in VMS if case.id == "qemu-services")
+
+    with pytest.raises(CommandFailure):
+        vm.test_vm(case, root, command)
+
+    command.assert_not_called()
 
 
 def test_short_runtime_state_supports_ssh_control_socket():
@@ -625,3 +877,164 @@ while not Path({str(ready)!r}).exists():
     # Successful parent exit also requires orderly cleanup of its descendants.
     run([sys.executable, "-c", parent_code], cwd=tmp_path, log=tmp_path / "log", timeout=10, grace=2)
     assert marker.read_text() == "cleaned"
+
+
+def test_qemu_shell_traps_use_shared_owned_cleanup():
+    scripts = (
+        Path("tests/e2e/qemu-install.sh"),
+        Path("tests/e2e/qemu-remote-install.sh"),
+        Path("tests/e2e/lifecycle-qemu.sh"),
+        Path("tests/e2e/external-client-qemu.sh"),
+    )
+    for path in scripts:
+        source = path.read_text(encoding="utf-8")
+        start = source.find("cleanup() {")
+        end = source.find("trap cleanup EXIT", start)
+        assert start >= 0 and end > start, f"{path} cleanup trap not found"
+        body = source[start:end]
+        assert "cleanup_owned_qemu" in body, f"{path} must delegate VM shutdown to the shared owner"
+        assert not any(
+            "kill" in line and "QEMU_PID" in line
+            for line in body.splitlines()
+        ), f"{path} must not signal QEMU using a bare pidfile PID"
+        cleanup_call = body.index("cleanup_owned_qemu")
+        for line in body.splitlines():
+            if "rm -rf" in line and "TMP_DIR" in line:
+                assert body.index(line) > cleanup_call, f"{path} removes VM state before owned shutdown"
+
+    common = Path("tests/e2e/common.sh").read_text(encoding="utf-8")
+    assert "cleanup_owned_qemu()" in common, "shared PIDFD cleanup owner missing"
+    owner = Path("tests/qemu_owner.py").read_text(encoding="utf-8")
+    assert "pidfd_open" in owner and "pidfd_send_signal" in owner, "shared cleanup must pin PID identity"
+    assert "os.kill(" not in owner, "shared owner must not fall back to numeric PID signals"
+    assert "QEMU_START_TICKS" in common and "disk.qcow2" in common, "shared cleanup must verify start and disk identity"
+
+
+@pytest.mark.parametrize("state", ["failed", "pending", "missing", "malformed"])
+def test_short_state_preserves_private_root_when_cleanup_status_incomplete(tmp_path, state):
+    import tests.support as support
+    from tests.qemu_owner import identity
+    registry = tmp_path / "process-registry"
+    registry.mkdir(mode=0o700)
+    retained = None
+    original = None
+    try:
+        with support.short_state(registry) as retained:
+            original = identity(retained)
+            owner = support._SCRATCH_OWNERS[str(registry)]
+            owner.begin()
+            if state == "failed":
+                owner.finish(False)
+            elif state == "missing":
+                owner.status.unlink()
+            elif state == "malformed":
+                owner.status.write_text("complete\n")
+        assert retained.is_dir(), "scratch was deleted without complete process cleanup"
+    finally:
+        if retained is not None and retained.is_dir():
+            assert retained.parent == Path("/tmp") and retained.name.startswith("nook-")
+            assert identity(retained) == original
+            retained.rmdir()  # exact verified empty test-owned root; no VM/files
+
+
+def test_short_state_complete_registry_removes_root(tmp_path):
+    import tests.support as support
+    registry = tmp_path / "process-registry"
+    registry.mkdir(mode=0o700)
+    with support.short_state(registry) as directory:
+        owner = support._SCRATCH_OWNERS[str(registry)]
+        owner.begin()
+        owner.finish(True)
+    assert not directory.exists(), "verified complete scratch was not reclaimed"
+
+
+def test_short_state_pending_writer_failure_cannot_use_stale_complete(tmp_path, monkeypatch):
+    import tests.support as support
+    from tests.qemu_owner import identity
+    registry = tmp_path / "process-registry"
+    registry.mkdir(mode=0o700)
+    retained = None
+    original = None
+    try:
+        with support.short_state(registry) as retained:
+            original = identity(retained)
+            previous = (registry / "cleanup.status").read_bytes()
+            def failed_writer(*args):
+                raise OSError("injected record write failure")
+            with monkeypatch.context() as patch:
+                patch.setattr(support, "write_private_json", failed_writer)
+                patch.setattr(support.subprocess, "Popen", lambda *args, **kwargs: pytest.fail("launch before pending publication"))
+                with pytest.raises(CommandFailure, match="safely"):
+                    support.run(["true"], cwd=tmp_path, log=tmp_path / "log", registry=registry)
+            assert (registry / "cleanup.status").read_bytes() == previous
+        assert retained.is_dir(), "stale complete authorized deletion after failed pending write"
+    finally:
+        if retained is not None and retained.is_dir():
+            assert retained.parent == Path("/tmp") and retained.name.startswith("nook-")
+            assert identity(retained) == original
+            retained.rmdir()
+
+
+@pytest.mark.parametrize("failure", ["group", "vm", "final-status"])
+def test_scratch_cleanup_failure_preserves_root_and_denies_next_launch(tmp_path, monkeypatch, failure):
+    import tests.support as support
+    from tests.qemu_owner import identity
+    registry = tmp_path / "process-registry"
+    registry.mkdir(mode=0o700)
+    retained = None
+    original = None
+    called = []
+    try:
+        with support.short_state(registry) as retained:
+            original = identity(retained)
+            original_writer = support.write_private_json
+            def group_cleanup(*args):
+                called.append("group")
+                if failure == "group":
+                    raise CommandFailure("injected group cleanup incomplete")
+            def vm_cleanup(*args):
+                called.append("vm")
+                if failure == "vm":
+                    raise CommandFailure("injected VM cleanup incomplete")
+            def write_status(path, value):
+                if failure == "final-status" and value["state"] == "complete" and value["generation"] > 0:
+                    raise OSError("injected final status write failure")
+                return original_writer(path, value)
+            with monkeypatch.context() as patch:
+                patch.setattr(support, "stop_group", group_cleanup)
+                patch.setattr(support, "cleanup_vms", vm_cleanup)
+                patch.setattr(support, "write_private_json", write_status)
+                with pytest.raises((CommandFailure, OSError)):
+                    support.run(["true"], cwd=tmp_path, log=tmp_path / "log", registry=registry)
+                assert called == ["group", "vm"], "both cleanup owners must run"
+                patch.setattr(support.subprocess, "Popen", lambda *args, **kwargs: pytest.fail("unconfirmed prior cleanup launched"))
+                with pytest.raises(CommandFailure):
+                    support.run(["true"], cwd=tmp_path, log=tmp_path / "second-log", registry=registry)
+        assert retained.is_dir()
+    finally:
+        if retained is not None and retained.is_dir():
+            assert retained.parent == Path("/tmp") and retained.name.startswith("nook-")
+            assert identity(retained) == original
+            retained.rmdir()
+
+
+def test_scratch_removal_failure_does_not_mask_primary(tmp_path, monkeypatch):
+    import tests.support as support
+    from tests.qemu_owner import identity
+    retained = None
+    original = None
+    try:
+        def failed_remove(*args):
+            raise OSError("injected removal failure")
+        with monkeypatch.context() as patch:
+            patch.setattr(support.shutil, "rmtree", failed_remove)
+            with pytest.raises(ValueError, match="primary sentinel"):
+                with support.short_state() as retained:
+                    original = identity(retained)
+                    raise ValueError("primary sentinel")
+        assert retained.is_dir()
+    finally:
+        if retained is not None and retained.is_dir():
+            assert retained.parent == Path("/tmp") and retained.name.startswith("nook-")
+            assert identity(retained) == original
+            retained.rmdir()

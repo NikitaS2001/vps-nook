@@ -30,6 +30,13 @@ command -v python3 >/dev/null || {
     exit 1
 }
 
+command -v strace >/dev/null || {
+    printf 'bootstrap: strace is required for the native installer PTY tests\n' >&2
+    exit 1
+}
+# Probe the actual syscall before creating or modifying development tooling.
+python3 -c 'import os; descriptor = os.pidfd_open(os.getpid()); os.close(descriptor)'
+
 python3 -m venv "${VENV_DIR}"
 "${VENV_DIR}/bin/python" -m pip install --disable-pip-version-check \
     -r "${ROOT_DIR}/requirements-dev.txt"

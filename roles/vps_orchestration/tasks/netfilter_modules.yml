@@ -7,6 +7,30 @@
     cache_valid_time: 3600
   tags: [docker, compose, traffic_mode]
 
+- name: "Netfilter | Prepare | Install verified AmneziaWG module"
+  ansible.builtin.include_tasks:
+    file: amneziawg_prepare.yml
+    apply:
+      tags: [docker, compose, traffic_mode]
+  when: wg_amnezia_enabled | bool
+  tags: [docker, compose, traffic_mode]
+
+- name: "Netfilter | Runtime | Persist the verified AmneziaWG kernel module"
+  community.general.modprobe:
+    name: amneziawg
+    state: present
+    persistent: present
+  when: wg_amnezia_enabled | bool
+  tags: [docker, compose, traffic_mode]
+
+- name: "Netfilter | Runtime | Confirm persistent AmneziaWG readiness"
+  ansible.builtin.command:
+    argv: [/usr/bin/python3, /usr/local/lib/vps-nook/awg_module.py, ready]
+  register: vps_orchestration_awg_ready
+  changed_when: (vps_orchestration_awg_ready.stdout | from_json).changed | bool
+  when: wg_amnezia_enabled | bool
+  tags: [docker, compose, traffic_mode]
+
 - name: "Netfilter | Runtime | Load and persist wg-easy legacy iptables modules"
   community.general.modprobe:
     name: "{{ item }}"

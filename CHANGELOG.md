@@ -4,6 +4,26 @@ Notable changes are recorded here. The project follows Semantic Versioning.
 
 ## Unreleased
 
+- Add optional AmneziaWG support through `wg_amnezia_enabled`. Check the host kernel module. Persist it. Select it in wg-easy without a `/lib/modules` mount. Use `awg` for live interface checks.
+- Add installer backend choice and edit field 8. The `NOOK_VPN_BACKEND=wg|awg` input defaults to WG, independently of `services`/`full` routing.
+- Persist the canonical encrypted backend value. Legacy vaults remain WG. Reruns preserve saved vault/password bytes, accept matching backend input, and reject switches.
+- Prepare pinned AWG source through distro DKMS and exact running-kernel headers. Share preflight between the installer and the controller. Preserve rerun state. Reject unsupported kernels and unattended reboot. Reject enabled or unknown Secure Boot, module signature enforcement, or lockdown. Matching clients remain required.
+- Save verified AWG installed identity before promoting interrupted DKMS receipts to `loaded` or `ready`.
+- Run the early AWG guard from checkout paths containing spaces, preserving tagged execution and failure propagation.
+- Continue cleanup of independently verified VM processes after another registry entry fails. Retain the aggregate failure and unverified state.
+- Prevent SIGPIPE failures in the synthetic health check when many peers report handshake timestamps.
+- Execute the guest sudo/PTY wrapper by script path while preserving piped installer input and hidden password checks.
+- Run interrupted-first-setup checks before creating peers, preserving the initial administrator identity during bootstrap recovery.
+- Isolate client probe routes from host routes so direct controls work with strict reverse-path filtering.
+- Stop cancelled AWG build services before releasing the module lock. Preserve a recovery barrier when termination is uncertain.
+- Preserve existing main-table IPv6 routes during public client probes, including failed probes.
+- Reject occupied probe routing tables even when iproute2 reports a configured table name.
+- Preserve retained-client ownership metadata after peer deletion fails so cleanup can retry.
+- Cancel the reboot observer through an owned pipe instead of signalling a numeric PID that Bash may already have reaped.
+- Separate core QEMU checks from the Vaultwarden extension scenario, with independent CI results and an explicit release gate.
+- Recopy private installer source as the hardened administrator before bootstrap retry after SSH cutover.
+- Preserve the active guest resolver during WG and AWG client preparation, preventing Debian package setup from removing `systemd-resolved`.
+- Refresh the pinned Debian stock test image to `20261026-2643`, whose `libssl3` version remains available in signed distro archives. Preserve exact-version authentication without upgrading the guest.
 - Organize operator-owned service recipes under `examples/<service>/`, with a complete Vaultwarden installation and lifecycle guide.
 - Pin the Vaultwarden image by tag and OCI index digest, close registration by default, and validate the recipe in the quick gate.
 - Clarify shared Compose override merging and the extension backup allowlist.

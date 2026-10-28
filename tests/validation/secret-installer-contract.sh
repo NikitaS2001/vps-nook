@@ -10,9 +10,25 @@ trap 'rm -rf -- "${TMP}"' EXIT HUP INT TERM
 
 fail() { printf '[FAIL] %s\n' "$*" >&2; exit 1; }
 
-# shellcheck source=../../install.sh
-source "${ROOT_DIR}/install.sh"
+# Keep the real installer/defaults owners, but relocate all deployment paths.
+sed "s|readonly INSTALL_ROOT=.*|readonly INSTALL_ROOT=\"${TMP}/installer\"|" \
+    "${ROOT_DIR}/install.sh" >"${TMP}/install.sh"
+source "${TMP}/install.sh"
 trap 'rm -rf -- "${TMP}"' EXIT HUP INT TERM
+mkdir -p "${REPO_DIR}/roles/vps_orchestration/defaults" "${TMP}/bin"
+cp "${ROOT_DIR}/roles/vps_orchestration/defaults/main.yml" \
+    "${REPO_DIR}/roles/vps_orchestration/defaults/main.yml"
+export PATH="${TMP}/bin:${PATH}"
+export MODULE_TRACE="${TMP}/module-trace"
+mkdir -p "${REPO_DIR}/roles/vps_orchestration/files"
+cat >"${REPO_DIR}/roles/vps_orchestration/files/awg_module.py" <<'PYTHON'
+import os
+import sys
+from pathlib import Path
+assert sys.argv[1:] == ['preflight']
+Path(os.environ['MODULE_TRACE']).write_text('verified-role-preflight')
+sys.exit(int(os.environ.get('MODULE_RC', '0')))
+PYTHON
 
 configure_fixture() {
     local state="$1"
@@ -47,6 +63,9 @@ set_inputs() {
     INTERNAL_DOMAIN_SUFFIX='internal'
     WG_TRAFFIC_MODE='services'
     WG_TRAFFIC_MODE_INPUT=''
+    VPN_BACKEND='wg'
+    VPN_BACKEND_INPUT=''
+    WG_AMNEZIA_ENABLED='false'
 }
 
 clear_inputs() {
@@ -68,6 +87,9 @@ clear_inputs() {
     INTERNAL_DOMAIN_SUFFIX=''
     WG_TRAFFIC_MODE='services'
     WG_TRAFFIC_MODE_INPUT=''
+    VPN_BACKEND='wg'
+    VPN_BACKEND_INPUT=''
+    WG_AMNEZIA_ENABLED='false'
 }
 
 view_vault() {
@@ -81,10 +103,191 @@ assert_private_pair() {
     grep -Fq '$ANSIBLE_VAULT;' "${VAULT_FILE}" || fail 'vault payload is not encrypted'
 }
 
+assert_backend_rejected() {
+    local label="$1" before rc
+    before="$(sha256sum "${VAULT_PASS_FILE}" "${VAULT_FILE}")"
+    rm -f -- "${VAULT_DIR}/applied"
+    set +e
+    (set -e; run_ansible_pull) >"${TMP}/backend-rejection.log" 2>&1
+    rc=$?
+    set -e
+    [[ "${rc}" -eq 1 ]] || fail "${label}: expected exit 1, got ${rc}"
+    [[ ! -e "${VAULT_DIR}/applied" ]] || fail "${label}: reached deployment"
+    [[ "${before}" == "$(sha256sum "${VAULT_PASS_FILE}" "${VAULT_FILE}")" ]] \
+        || fail "${label}: changed committed vault/password bytes"
+    printf '[PASS] backend-rejection: %s exit=%s unchanged-pair no-deployment\n' "${label}" "${rc}"
+}
+
+configure_backend_pull() {
+    ANSIBLE_PULL_BIN="${TMP}/ansible-pull"
+    RESOLVED_RELEASE_REF="$(git -C "${ROOT_DIR}" rev-parse HEAD)"
+    export EXPECTED_BACKEND="${1:-false}" BACKEND_STATE="${VAULT_DIR}" BACKEND_FIXTURE="${TMP}"
+    mkdir -p "${TMP}/roles/backend/tasks" "${TMP}/roles/backend/defaults"
+    cp "${ROOT_DIR}/roles/vps_orchestration/defaults/main.yml" "${TMP}/roles/backend/defaults/main.yml"
+    printf '%s\n' '---' 'all:' '  hosts:' '    localhost:' \
+        '      ansible_connection: local' '      wg_amnezia_enabled: true' >"${TMP}/inventory.yml"
+    cat >"${TMP}/roles/backend/tasks/main.yml" <<'YAML'
+---
+- name: Assert actual typed backend precedence
+  ansible.builtin.assert:
+    that:
+      - wg_amnezia_enabled is boolean
+      - wg_amnezia_enabled == (lookup('ansible.builtin.env', 'EXPECTED_BACKEND') == 'true')
+  no_log: true
+YAML
+    printf '%s\n' '---' '- hosts: localhost' '  gather_facts: false' \
+        '  roles: [backend]' >"${TMP}/precedence.yml"
+    cat >"${ANSIBLE_PULL_BIN}" <<'PY'
+#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+args = sys.argv[1:]
+state = Path(os.environ["BACKEND_STATE"])
+fixture = Path(os.environ["BACKEND_FIXTURE"])
+extras = [args[i + 1] for i, arg in enumerate(args) if arg == "--extra-vars"]
+assert len(extras) == 2, "missing explicit backend extra-vars"
+assert extras[0] == "@" + str(state / "installer-vault.yml")
+backend = json.loads(extras[1])
+assert set(backend) == {"wg_amnezia_enabled"}
+assert type(backend["wg_amnezia_enabled"]) is bool
+assert backend["wg_amnezia_enabled"] == (os.environ["EXPECTED_BACKEND"] == "true")
+assert re.fullmatch(r"[0-9a-f]{40}", args[args.index("-C") + 1])
+assert args[-1] == "site.yml"
+for secret in ("fixture-admin-value", "fixture-adguard-value", "fixture-wireguard-value",
+               "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "$6$", "$2y$"):
+    assert secret not in " ".join(args), "secret in ansible-pull argv"
+assert not any(key in os.environ for key in (
+    "ADMIN_PASSWORD", "ADGUARD_PASSWORD", "WG_PASSWORD", "SSH_PUBKEY"))
+(state / "pull.args.json").write_text(json.dumps(args))
+subprocess.run(["ansible-playbook", "-i", str(fixture / "inventory.yml"),
+                "--vault-password-file", str(state / "installer-vault.pass"),
+                "--extra-vars", extras[0], "--extra-vars", extras[1],
+                str(fixture / "precedence.yml")], check=True)
+(state / "applied").touch()
+sys.exit(int(os.environ.get("PULL_RC", "0")))
+PY
+    chmod 0700 "${ANSIBLE_PULL_BIN}"
+}
+
+run_backend_roundtrip() {
+    local backend="$1" expected before plain supplied
+    configure_fixture "${TMP}/backend-${backend}"
+    set_inputs
+    VPN_BACKEND="${backend}"
+    expected=false
+    [[ "${backend}" != awg ]] || expected=true
+    configure_backend_pull "${expected}"
+    prepare_installer_vault
+    assert_private_pair
+    plain="$(view_vault)"
+    [[ "${plain}" == *"wg_amnezia_enabled: \"${expected}\""* ]] \
+        || fail "${backend}: canonical backend string missing from new vault"
+    before="$(sha256sum "${VAULT_PASS_FILE}" "${VAULT_FILE}")"
+    for supplied in '' "${backend}"; do
+        clear_inputs
+        NOOK_VPN_BACKEND="${supplied}" collect_configuration_noninteractive
+        run_ansible_pull
+        [[ "${VPN_BACKEND}:${WG_AMNEZIA_ENABLED}" == "${backend}:${expected}" ]] \
+            || fail "${backend}: rerun did not restore authoritative backend"
+        [[ -f "${VAULT_DIR}/applied" ]] || fail "${backend}: rerun did not reach deployment"
+        [[ "${before}" == "$(sha256sum "${VAULT_PASS_FILE}" "${VAULT_FILE}")" ]] \
+            || fail "${backend}: rerun rewrote encrypted state"
+        printf '[PASS] backend-roundtrip: %s supplied=%s exit=0 unchanged-pair deployment-reached\n' \
+            "${backend}" "${supplied:-omitted}"
+    done
+    clear_inputs
+    if [[ "${backend}" == awg ]]; then
+        NOOK_VPN_BACKEND=wg collect_configuration_noninteractive
+    else
+        NOOK_VPN_BACKEND=awg collect_configuration_noninteractive
+    fi
+    assert_backend_rejected "${backend}-conflict"
+}
+
+run_backend_preflight() {
+    local rc before
+    configure_fixture "${TMP}/fresh-unsupported-platform"
+    configure_backend_pull true
+    set_inputs
+    VPN_BACKEND=awg
+    set +e
+    (set -e; MODULE_RC=1 run_ansible_pull) >"${TMP}/unsupported.log" 2>&1
+    rc=$?
+    set -e
+    [[ "${rc}" -eq 1 ]] || fail "infeasible platform was accepted"
+    [[ ! -e "${VAULT_FILE}" && ! -e "${VAULT_PASS_FILE}" && ! -e "${VAULT_MARKER}" \
+        && ! -e "${VAULT_DIR}/applied" ]] || fail 'preflight committed fresh state or deployed'
+    [[ "$(<"${MODULE_TRACE}")" == verified-role-preflight ]] || fail 'wrong preflight owner'
+
+    configure_fixture "${TMP}/preflight-wg"
+    configure_backend_pull
+    set_inputs
+    rm -f -- "${MODULE_TRACE}"
+    MODULE_RC=1 run_ansible_pull
+    [[ ! -e "${MODULE_TRACE}" ]] || fail 'WG ran AWG preflight'
+
+    configure_fixture "${TMP}/preflight-fresh-awg"
+    configure_backend_pull true
+    set_inputs
+    VPN_BACKEND=awg
+    # Feasibility owner permits a fresh host without an installed module.
+    run_ansible_pull
+    before="$(sha256sum "${VAULT_PASS_FILE}" "${VAULT_FILE}")"
+    clear_inputs
+    MODULE_RC=1 assert_backend_rejected saved-awg-infeasible
+    [[ "${before}" == "$(sha256sum "${VAULT_PASS_FILE}" "${VAULT_FILE}")" ]] || fail 'preflight changed saved state'
+    clear_inputs
+    set +e
+    (set -e; PULL_RC=23 run_ansible_pull) >"${TMP}/loader-failure.log" 2>&1
+    rc=$?
+    set -e
+    [[ "${rc}" -eq 1 && -e "${VAULT_DIR}/applied" ]] || fail 'later loader failure did not propagate'
+    [[ "${before}" == "$(sha256sum "${VAULT_PASS_FILE}" "${VAULT_FILE}")" ]] || fail 'loader failure changed saved state'
+    [[ ! -e "${VAULT_MARKER}" ]] || fail 'role invocation retained transaction marker'
+    printf '[PASS] backend-preflight: shared owner; WG bypass; fresh refusal and saved failures preserve state\n'
+}
+
+run_backend_legacy() {
+    local before plain
+    configure_fixture "${TMP}/backend-legacy"
+    configure_backend_pull
+    set_inputs
+    prepare_installer_vault
+    plain="${TMP}/legacy-plain.yml"
+    view_vault | sed '/^wg_amnezia_enabled:/d' >"${plain}"
+    "${VAULT_ANSIBLE_BIN}" encrypt --vault-password-file "${VAULT_PASS_FILE}" \
+        --output "${TMP}/legacy-encrypted.yml" "${plain}"
+    mv -- "${TMP}/legacy-encrypted.yml" "${VAULT_FILE}"
+    chmod 0600 "${VAULT_FILE}"
+    before="$(sha256sum "${VAULT_PASS_FILE}" "${VAULT_FILE}")"
+    clear_inputs
+    VPN_BACKEND=awg
+    WG_AMNEZIA_ENABLED=true
+    run_ansible_pull
+    [[ "${VPN_BACKEND}:${WG_AMNEZIA_ENABLED}" == wg:false ]] \
+        || fail 'legacy schema did not normalize to explicit WG in memory'
+    [[ "${before}" == "$(sha256sum "${VAULT_PASS_FILE}" "${VAULT_FILE}")" ]] \
+        || fail 'legacy load rewrote encrypted state'
+    [[ -f "${VAULT_DIR}/applied" ]] || fail 'legacy load did not reach deployment'
+    printf '[PASS] backend-legacy: exit=0 explicit-false unchanged-pair deployment-reached\n'
+    clear_inputs
+    NOOK_VPN_BACKEND=wg collect_configuration_noninteractive
+    run_ansible_pull
+    clear_inputs
+    NOOK_VPN_BACKEND=awg collect_configuration_noninteractive
+    assert_backend_rejected legacy-conflict
+}
+
 run_whole_vault_schema_contract() {
     local malformed_plain malformed_vault original_vault scenario state valid_plain
     state="${TMP}/whole-vault-schema"
     configure_fixture "${state}"
+    configure_backend_pull
     set_inputs
     prepare_installer_vault
     original_vault="${TMP}/original-installer-vault.yml"
@@ -93,7 +296,7 @@ run_whole_vault_schema_contract() {
     view_vault >"${valid_plain}"
     malformed_plain="${TMP}/malformed-installer-vault.yml"
     malformed_vault="${TMP}/malformed-installer-vault.encrypted.yml"
-    for scenario in duplicate-bootstrap unknown-key duplicate-and-unknown duplicate-routing missing-routing malformed-endpoint malformed-admin-hash-type malformed-control-type wrong-connection-control wrong-vault-path-control; do
+    for scenario in duplicate-bootstrap unknown-key duplicate-and-unknown duplicate-routing missing-routing malformed-endpoint malformed-admin-hash-type malformed-control-type wrong-connection-control wrong-vault-path-control duplicate-backend boolean-backend list-backend uppercase-backend numeric-backend empty-backend invalid-backend legacy-missing-routing legacy-unknown-key; do
         cp -- "${valid_plain}" "${malformed_plain}"
         case "${scenario}" in
             duplicate-bootstrap)
@@ -127,6 +330,28 @@ run_whole_vault_schema_contract() {
             wrong-vault-path-control)
                 sed -i 's|^vps_services_vault_path:.*|vps_services_vault_path: "/tmp/wrong-installer-vault.yml"|' "${malformed_plain}"
                 ;;
+            duplicate-backend)
+                printf '%s\n' 'wg_amnezia_enabled: "true"' >>"${malformed_plain}"
+                ;;
+            boolean-backend|list-backend|uppercase-backend|numeric-backend|empty-backend|invalid-backend)
+                local backend_value
+                case "${scenario}" in
+                    boolean-backend) backend_value=true ;;
+                    list-backend) backend_value='[false]' ;;
+                    uppercase-backend) backend_value='"TRUE"' ;;
+                    numeric-backend) backend_value=0 ;;
+                    empty-backend) backend_value='""' ;;
+                    invalid-backend) backend_value='"awg"' ;;
+                esac
+                sed -i "s/^wg_amnezia_enabled:.*/wg_amnezia_enabled: ${backend_value}/" "${malformed_plain}"
+                ;;
+            legacy-missing-routing)
+                sed -i '/^wg_amnezia_enabled:/d; /^wg_port:/d' "${malformed_plain}"
+                ;;
+            legacy-unknown-key)
+                sed -i '/^wg_amnezia_enabled:/d' "${malformed_plain}"
+                printf '%s\n' 'unexpected_top_level_key: "must-be-rejected"' >>"${malformed_plain}"
+                ;;
         esac
         "${VAULT_ANSIBLE_BIN}" encrypt --vault-password-file "${VAULT_PASS_FILE}" \
             --output "${malformed_vault}" "${malformed_plain}"
@@ -143,6 +368,7 @@ run_whole_vault_schema_contract() {
         if (load_installer_inputs) >/dev/null 2>&1; then
             fail "loader accepted malformed whole-vault scenario: ${scenario}"
         fi
+        assert_backend_rejected "${scenario}"
         printf '[PASS] whole-vault-schema-rejection: %s\n' "${scenario}"
     done
 
@@ -155,11 +381,21 @@ run_whole_vault_schema_contract() {
 }
 
 if [[ "${1:-}" == --case ]]; then
-    [[ "${2:-}" == whole-vault-schema ]] || fail "unknown case: ${2:-missing}"
-    run_whole_vault_schema_contract
+    case "${2:-}" in
+        whole-vault-schema) run_whole_vault_schema_contract ;;
+        backend-wg) run_backend_roundtrip wg ;;
+        backend-awg) run_backend_roundtrip awg ;;
+        backend-legacy) run_backend_legacy ;;
+        backend-preflight) run_backend_preflight ;;
+        *) fail "unknown case: ${2:-missing}" ;;
+    esac
     exit 0
 fi
 
+run_backend_preflight
+run_backend_roundtrip wg
+run_backend_roundtrip awg
+run_backend_legacy
 run_whole_vault_schema_contract
 
 state_one="${TMP}/one"

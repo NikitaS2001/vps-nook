@@ -4,7 +4,17 @@ umask 077
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/traffic-mode-contract.XXXXXX")"
-cleanup() { find "${TMP}" -depth -delete; }
+cleanup() {
+  local status=$?
+  if [[ "${TRAFFIC_TEST_PRESERVE_FAILURE:-0}" == 1 && "${status}" != 0 ]]; then
+    printf '[PRIVATE_FAILURE_ARTIFACTS] path=%s\n' "${TMP}"
+    trap - EXIT INT TERM
+    exit "${status}"
+  fi
+  find "${TMP}" -depth -delete
+  [[ ! -e "${TMP}" ]]
+  printf '[CLEANUP] traffic_fixture_removed=%s\n' "${TMP}"
+}
 trap cleanup EXIT INT TERM
 
 PROJECT="${TMP}/project"
@@ -50,10 +60,33 @@ case "${1:-}" in
     ;;
   exec)
     shift 2
-    if [[ "$*" == "wg show wg0" ]]; then
+    if [[ "$*" == "wg show wg0" || "$*" == "awg show wg0" ]]; then
+      [[ "${1}" == "${TRAFFIC_TEST_EXECUTABLE:?}" ]] || exit 74
       [[ ! -e "${TRAFFIC_TEST_FAIL_READINESS:-/nonexistent}" ]]
       exit
     fi
+    # The production boundary must distinguish Docker transport failure from
+    # the container command's rule-absence exit, even when both are exit 1.
+    if [[ "${1:-}" == sh ]]; then
+      [[ "${TRAFFIC_TEST_QUERY_FAULT:-}" != daemon || "${TRAFFIC_TEST_QUERY_FAMILY:-${@: -1}}" != "${@: -1}" ]] || exit 1
+      exec "$@"
+    fi
+    query_status="${TRAFFIC_TEST_QUERY_FAULT:-}"
+    [[ "${TRAFFIC_TEST_QUERY_FAMILY:-${1}}" == "${1}" ]] || query_status=""
+    if [[ -n "${query_status}" && "${query_status}" != daemon ]]; then
+      if [[ "${1:-}" == iptables && "${2:-}" == -S && "${3:-}" == FORWARD ]]; then
+        case "${query_status}" in
+          empty) exit 0 ;;
+          malformed) printf '%s\n' 'malformed policy output'; exit 0 ;;
+          0)
+            printf '%s\n' '-P FORWARD ACCEPT' '-A FORWARD -i wg0 -j WG_CLIENTS'
+            exit 0
+            ;;
+        esac
+      fi
+      exit "${query_status}"
+    fi
+    [[ "${query_status}" != daemon ]] || exit 1
     firewall="$(python3 - "${TRAFFIC_TEST_DB:?}" <<'PY'
 import sqlite3,sys
 with sqlite3.connect(sys.argv[1]) as db:
@@ -66,6 +99,13 @@ PY
     if [[ "${1:-}" == -C ]]; then
       [[ "${firewall}" == 1 ]]
       exit
+    fi
+    if [[ "${1:-}" == -S && "${2:-}" == FORWARD ]]; then
+      printf '%s\n' '-P FORWARD ACCEPT'
+      if [[ "${firewall}" == 1 ]]; then
+        printf '%s\n' '-A FORWARD -i wg0 -j WG_CLIENTS'
+      fi
+      exit 0
     fi
     if [[ "${1:-}" == -S && "${2:-}" == WG_CLIENTS && "${firewall}" == 1 ]]; then
       if [[ "${family}" == iptables ]]; then
@@ -87,6 +127,14 @@ PY
 esac
 SH
 chmod 0755 "${BIN}/docker"
+for family in iptables ip6tables; do
+  cat >"${BIN}/${family}" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+exec docker exec wg-easy "$(basename "$0")" "$@"
+SH
+  chmod 0755 "${BIN}/${family}"
+done
 cat >"${BIN}/cp" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -122,6 +170,12 @@ cat >"${TMP}/playbook.yml" <<YAML
     wg_services_only_ipv4_destinations: ["10.8.0.0/24", "10.66.0.2/32", "10.66.0.3/32"]
     wg_services_only_ipv6_destinations: ["fd42:42:42::/64"]
     vps_orchestration_traffic_mode_readiness_retries: 1
+    wg_amnezia_enabled: false
+    wg_amnezia_overrided_executable: awg
+    # Mirrors the role default; this contract imports task files directly and
+    # therefore does not load role defaults.
+    vps_orchestration_wg_executable: >-
+      {{ wg_amnezia_overrided_executable if wg_amnezia_enabled | bool else 'wg' }}
   tasks:
     - ansible.builtin.import_tasks: "${ROOT}/roles/vps_orchestration/tasks/traffic_mode.yml"
 YAML
@@ -129,6 +183,7 @@ YAML
 export PATH="${BIN}:${PATH}"
 export TRAFFIC_TEST_LOG="${LOG}"
 export TRAFFIC_TEST_DB="${DB}"
+export TRAFFIC_TEST_EXECUTABLE=wg
 export TRAFFIC_TEST_START_COUNT="${TMP}/start-count"
 printf '0\n' >"${TRAFFIC_TEST_START_COUNT}"
 
@@ -180,6 +235,48 @@ after_mutations="$(grep -Ec '^docker (stop|start) ' "${LOG}" || true)"
 runtime_drift_mutation_delta="$((after_mutations - before_mutations))"
 unset TRAFFIC_TEST_RUNTIME_DRIFT
 
+# Exercise the actual Ansible transaction and its SQLite/marker rollback for
+# both selected executables. A failed rule-list query is never absence.
+for backend in wg awg; do
+  export TRAFFIC_TEST_EXECUTABLE="${backend}"
+  amnezia=false
+  [[ "${backend}" != awg ]] || amnezia=true
+  for fault in 1 empty malformed 70 127 124 daemon 0; do
+    cp "${DB}" "${TMP}/before-query.db"
+    cp "${PROJECT}/.wg-traffic-mode" "${TMP}/before-query.marker"
+    export TRAFFIC_TEST_QUERY_FAULT="${fault}"
+    code=0
+    ansible-playbook "${TMP}/playbook.yml" -e "wg_amnezia_enabled=${amnezia}" \
+      -e wg_traffic_mode=full >"${TMP}/query-fault.log" 2>&1 || code=$?
+    unset TRAFFIC_TEST_QUERY_FAULT
+    if [[ "${code}" != 2 ]]; then
+      printf '[FAIL] firewall-query backend=%s fault=%s expected=2 actual=%s\n' "${backend}" "${fault}" "${code}" >&2
+      exit 1
+    fi
+    cmp "${DB}" "${TMP}/before-query.db"
+    cmp "${PROJECT}/.wg-traffic-mode" "${TMP}/before-query.marker"
+    [[ -z "$(find "${PROJECT}" -maxdepth 1 -name '.wg-traffic-mode.transaction.*' -print -quit)" ]]
+    printf '[PASS] firewall-query backend=%s fault=%s exit=2 sqlite_and_marker_byte_restored=true\n' "${backend}" "${fault}"
+  done
+  cp "${DB}" "${TMP}/before-query.db"
+  cp "${PROJECT}/.wg-traffic-mode" "${TMP}/before-query.marker"
+  export TRAFFIC_TEST_QUERY_FAULT=70 TRAFFIC_TEST_QUERY_FAMILY=ip6tables
+  code=0
+  ansible-playbook "${TMP}/playbook.yml" -e "wg_amnezia_enabled=${amnezia}" \
+    -e wg_traffic_mode=full >"${TMP}/query-ipv6-fault.log" 2>&1 || code=$?
+  unset TRAFFIC_TEST_QUERY_FAULT TRAFFIC_TEST_QUERY_FAMILY
+  [[ "${code}" == 2 ]]
+  cmp "${DB}" "${TMP}/before-query.db"
+  cmp "${PROJECT}/.wg-traffic-mode" "${TMP}/before-query.marker"
+  printf '[PASS] firewall-query backend=%s family=ip6tables fault=70 exit=2 sqlite_and_marker_byte_restored=true\n' "${backend}"
+  ansible-playbook "${TMP}/playbook.yml" -e "wg_amnezia_enabled=${amnezia}" \
+    -e wg_traffic_mode=full >"${TMP}/query-absent.log" 2>&1
+  [[ "$(<"${PROJECT}/.wg-traffic-mode")" == full ]]
+  printf '[PASS] firewall-query backend=%s exact_rule_absent=true query_exit=0 full_commit=true\n' "${backend}"
+  ansible-playbook "${TMP}/playbook.yml" -e "wg_amnezia_enabled=${amnezia}" >"${TMP}/query-reset.log" 2>&1
+done
+export TRAFFIC_TEST_EXECUTABLE=wg
+
 python3 - "${DB}" <<'PY'
 import json,sqlite3,sys
 with sqlite3.connect(sys.argv[1]) as db:
@@ -207,6 +304,80 @@ ansible-playbook "${TMP}/playbook.yml" \
   -e vps_orchestration_full_ipv6_enabled=false >"${TMP}/full-ipv4-only.log"
 [[ "$(<"${PROJECT}/.wg-traffic-mode")" == full ]]
 [[ "$(read_policy)" == '{"client": null, "firewall": 0, "routes": ["0.0.0.0/0"]}' ]]
+
+# Execute the exact SSH guest command built by common.sh, not an imitation
+# of its firewall assertion. SSH/sudo are local adapters, no host privileges.
+(
+  source "${ROOT}/tests/e2e/common.sh"
+  sudo() { "$@"; }
+  export -f sudo
+  sudo test -d "${TMP}"
+  run_remote() {
+    case "$4" in
+      'sudo cat /opt/vps-nook/.wg-traffic-mode') printf 'full\n' ;;
+      *) bash -c "$4" ;;
+    esac
+  }
+  unset TRAFFIC_TEST_QUERY_FAULT TRAFFIC_TEST_QUERY_FAMILY
+  (TRAFFIC_TEST_QUERY_FAULT="" verify_traffic_mode fixture 22 fixture full)
+  printf '[PASS] guest-firewall-query fault=none exact_rule_absent=true query_exit=0\n'
+  for fault in 1 empty malformed 0 70 127 124 daemon; do
+    code=0
+    (TRAFFIC_TEST_QUERY_FAULT="${fault}" verify_traffic_mode fixture 22 fixture full) \
+      >"${TMP}/guest-query.log" 2>&1 || code=$?
+    if [[ "${code}" == 0 ]]; then
+      printf '[FAIL] guest-firewall-query fault=%s expected=nonzero actual=0\n' "${fault}" >&2
+      exit 1
+    fi
+    printf '[PASS] guest-firewall-query fault=%s exit=%s query_error_not_absence=true\n' \
+      "${fault}" "${code}"
+  done
+)
+
+# Isolate each backend run: a previous successful query cannot satisfy it.
+export TRAFFIC_TEST_EXECUTABLE=awg
+: >"${LOG}"
+ansible-playbook "${TMP}/playbook.yml" \
+  -e wg_amnezia_enabled=true -e wg_traffic_mode=services >"${TMP}/amnezia-services.log"
+grep -Fxq 'docker exec wg-easy awg show wg0' "${LOG}"
+if grep -Eq '^docker exec wg-easy wg show' "${LOG}"; then
+  echo 'AmneziaWG services run queried the WG executable' >&2
+  exit 1
+fi
+[[ "$(<"${PROJECT}/.wg-traffic-mode")" == services ]]
+[[ "$(read_policy)" == '{"client": ["10.8.0.0/24", "10.66.0.2/32", "10.66.0.3/32", "fd42:42:42::/64"], "firewall": 1, "routes": ["10.8.0.0/24", "10.66.0.2/32", "10.66.0.3/32", "fd42:42:42::/64"]}' ]]
+: >"${LOG}"
+ansible-playbook "${TMP}/playbook.yml" \
+  -e wg_amnezia_enabled=true -e wg_traffic_mode=full >"${TMP}/amnezia.log"
+grep -Fxq 'docker exec wg-easy awg show wg0' "${LOG}"
+if grep -Eq '^docker exec wg-easy wg show' "${LOG}"; then
+  echo 'AmneziaWG full run queried the WG executable' >&2
+  exit 1
+fi
+[[ "$(<"${PROJECT}/.wg-traffic-mode")" == full ]]
+[[ "$(read_policy)" == '{"client": null, "firewall": 0, "routes": ["0.0.0.0/0"]}' ]]
+
+cp "${DB}" "${TMP}/before-wrong-tool.db"
+cp "${PROJECT}/.wg-traffic-mode" "${TMP}/before-wrong-tool.marker"
+: >"${LOG}"
+if ansible-playbook "${TMP}/playbook.yml" -e wg_traffic_mode=full >"${TMP}/wrong-tool.log" 2>&1; then
+  echo 'plain WG executable unexpectedly accepted an AWG interface' >&2
+  exit 1
+fi
+grep -Fxq 'docker exec wg-easy wg show wg0' "${LOG}"
+grep -Fq 'original wg-easy state was restored' "${TMP}/wrong-tool.log"
+cmp "${DB}" "${TMP}/before-wrong-tool.db"
+cmp "${PROJECT}/.wg-traffic-mode" "${TMP}/before-wrong-tool.marker"
+[[ -z "$(find "${PROJECT}" -maxdepth 1 -name '.wg-traffic-mode.transaction.*' -print -quit)" ]]
+
+export TRAFFIC_TEST_EXECUTABLE=wg
+: >"${LOG}"
+ansible-playbook "${TMP}/playbook.yml" -e wg_traffic_mode=full >"${TMP}/amnezia-rerun.log"
+grep -Fxq 'docker exec wg-easy wg show wg0' "${LOG}"
+if grep -Eq '^docker exec wg-easy awg show' "${LOG}"; then
+  echo 'non-AmneziaWG run still queried the awg executable' >&2
+  exit 1
+fi
 
 cp "${DB}" "${TMP}/before-post-marker-fault.db"
 post_marker_db_sha="$(sha256sum "${DB}" | cut -d' ' -f1)"
@@ -343,11 +514,13 @@ source=Path(os.environ["TRAFFIC_TASK"]).read_text()
 for forbidden in ("DOCKER-USER", "POSTROUTING", "systemctl", "traffic-mode-firewall"):
     if forbidden in source:
         raise SystemExit(f"obsolete host policy remains: {forbidden}")
-for required in ("firewall_enabled", "WG_CLIENTS", "wg show wg0"):
+for required in ("firewall_enabled", "WG_CLIENTS", "vps_orchestration_wg_executable"):
     if required not in source:
         raise SystemExit(f"missing pre-NAT policy invariant: {required}")
 PY
 
+printf '[PASS] amneziawg=live_readiness_uses_awg_executable; plain_mode_uses_wg\n'
+printf '[PASS] backend_runs=AWG_services,AWG_full,WG_full; wrong_tool=rejected,db_and_marker_restored,no_transaction_residue\n'
 printf '[PASS] services=private_routes,firewall_enabled,WG_CLIENTS_v4_v6_terminal_drop\n'
 printf '[PASS] full=default_routes,firewall_disabled\n'
 printf '[PASS] marker_drift=reconciled_from_database\n'

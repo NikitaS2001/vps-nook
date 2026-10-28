@@ -10,6 +10,18 @@ argument_specs:
         type: str
         choices: [services, full]
         default: services
+      wg_amnezia_enabled:
+        description: Prepare pinned AWG with distro DKMS on supported kernels without Secure Boot or automatic reboot
+        type: bool
+        default: false
+      wg_amnezia_kernel_module:
+        type: str
+        choices: [amneziawg]
+        default: amneziawg
+      wg_amnezia_overrided_executable:
+        type: str
+        choices: [awg]
+        default: awg
       docker_network_subnet:
         type: str
         default: 10.66.0.0/24

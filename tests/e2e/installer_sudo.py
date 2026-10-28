@@ -4,7 +4,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-from tests.installer.pty_fixture import create_ux
+from tests.installer.pty_fixture import DialogueTimeout, create_ux
 
 
 def main():
@@ -18,9 +18,19 @@ def main():
     temporary = Path(tempfile.mkdtemp(prefix="nook-sudo-pty-"))
     try:
         ux = create_ux(root, temporary, temporary / "pty.log",
-                       consumer=("sudo", "-n", "-E", "bash", "-c", 'test "$EUID" -eq 0 && exec bash'))
+                       consumer=("sudo", "-n", "-E", "bash", "-c",
+                                 'test "$EUID" -eq 0 && exec bash "$1"', 'nook-sudo-pty'),
+                       consumer_script=True)
         _, trace = ux.run_case("sudo pipe", ux.base + [("Install, edit, or cancel", "i\n")])
         assert "applied" in trace, "sudo pipeline did not complete installer input handling"
+    except DialogueTimeout as error:
+        output_path = temporary / "pty.log"
+        syscall_path = temporary / "pty.ioctl.log"
+        output = output_path.read_bytes() if output_path.is_file() else b""
+        syscalls = syscall_path.read_text() if syscall_path.is_file() else ""
+        print(f"[PTY DIAGNOSTIC] pending_prompt_visible={error.pending.encode() in output}", flush=True)
+        print(f"[PTY DIAGNOSTIC] sigttin={'SIGTTIN' in syscalls}", flush=True)
+        raise
     finally:
         # Only this guest-only entrypoint escalates. The fixture may create root-owned state.
         subprocess.run(["sudo", "-n", "rm", "-rf", "--", str(temporary)], check=True,

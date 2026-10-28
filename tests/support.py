@@ -1,5 +1,6 @@
 """Private source snapshots and bounded subprocess execution (Linux, sequential)."""
 from contextlib import contextmanager
+import secrets
 import os
 from pathlib import Path
 import shutil
@@ -9,17 +10,97 @@ import sys
 import time
 import tempfile
 
+from tests.qemu_owner import OwnerError, identity, private_json, write_private_json, terminate_owned
+
 
 class CommandFailure(RuntimeError):
     """Only safe metadata belongs in this exception, never command output or argv."""
 
 
+_SCRATCH_OWNERS = {}
+
+
+class ScratchOwner:
+    """An in-memory capability prevents stale on-disk complete records authorizing deletion."""
+    def __init__(self, registry, directory):
+        self.registry = Path(registry).absolute()
+        self.registry_identity = identity(self.registry)
+        self.directory = directory
+        self.root_identity = identity(directory)
+        self.nonce = secrets.token_hex(16)
+        self.generation = 0
+        self.authorized = False
+        self.retain = False
+        self.status = self.registry / "cleanup.status"
+        if self.status.exists() or self.status.is_symlink():
+            raise OwnerError("New scratch registry already has cleanup state")
+        self.write("complete")
+        self.authorized = True
+
+    def record(self, state):
+        return {"schema": 1, "nonce": self.nonce, "generation": self.generation, "state": state,
+                "root": str(self.directory), "identity": self.root_identity}
+
+    def write(self, state):
+        if identity(self.registry) != self.registry_identity:
+            raise OwnerError("Process registry directory changed")
+        write_private_json(self.status, self.record(state))
+
+    def matches(self, state):
+        return identity(self.registry) == self.registry_identity and private_json(self.status) == self.record(state)
+
+    def begin(self):
+        was_authorized = self.authorized
+        self.authorized = False
+        if not was_authorized or not self.matches("complete"):
+            raise OwnerError("Previous process cleanup was not verified complete")
+        self.generation += 1
+        self.write("pending")
+
+    def finish(self, complete):
+        if not self.matches("pending"):
+            raise OwnerError("Pending process generation changed")
+        self.write("complete" if complete else "failed")
+        self.authorized = bool(complete)
+
+
 @contextmanager
-def short_state():
-    # OpenSSH adds a random suffix to ControlPath; Linux sun_path is 108 bytes.
-    # Keep runtime state short even when pytest basetemp/TMPDIR is deeply nested.
-    with tempfile.TemporaryDirectory(prefix="nook-", dir="/tmp") as directory:
-        yield Path(directory)
+def short_state(registry=None):
+    # Linux SSH ControlPath is 108 bytes: runtime scratch remains short/private.
+    directory = Path(tempfile.mkdtemp(prefix="nook-", dir="/tmp"))
+    original = identity(directory)
+    owner = None
+    key = str(Path(registry).absolute()) if registry is not None else None
+    try:
+        if key is not None:
+            if key in _SCRATCH_OWNERS:
+                raise OwnerError("Scratch registry already has an active owner")
+            owner = ScratchOwner(registry, directory)
+            _SCRATCH_OWNERS[key] = owner
+        yield directory
+    finally:
+        primary_error = sys.exc_info()[1]
+        allowed = False
+        try:
+            allowed = identity(directory) == original and (
+                key is None or (owner is not None and owner.authorized and not owner.retain and owner.matches("complete")))
+        except (OSError, ValueError, OwnerError):
+            pass
+        if allowed:
+            try:
+                shutil.rmtree(directory)
+            except OSError:
+                print(f"Private QA scratch retained: {directory}; removal failed", file=sys.stderr)
+                if owner is not None:
+                    owner.authorized = False
+                    if _SCRATCH_OWNERS.get(key) is owner:
+                        del _SCRATCH_OWNERS[key]
+                if primary_error is None:
+                    raise
+        else:
+            print(f"Private QA scratch retained: {directory}; cleanup not confirmed", file=sys.stderr)
+        if owner is not None and _SCRATCH_OWNERS.get(key) is owner:
+            del _SCRATCH_OWNERS[key]
 
 
 def snapshot(source, destination):
@@ -106,64 +187,67 @@ def process_identity(pid):
         return None
 
 
+def validate_vm_entry(value, phase):
+    from tests.qemu_owner import validate_state_record
+    value = validate_state_record(value)
+    if not isinstance(value, dict) or value.get("schema") != 1 or value.get("phase") != phase:
+        raise OwnerError("Incomplete QEMU registry record")
+    directory = Path(value["directory"])
+    executable = Path(value["executable"])
+    if not directory.is_absolute() or not executable.is_absolute() or not executable.name.startswith("qemu-system-"):
+        raise OwnerError("Incomplete exact QEMU executable/directory ownership")
+    if value.get("disk") != str(directory / "disk.qcow2"):
+        raise OwnerError("QEMU owned disk record differs")
+    if directory.exists() or directory.is_symlink():
+        if identity(directory) != value["identity"]:
+            raise OwnerError("QEMU registered directory identity changed")
+    return value
+
+
 def cleanup_vms(registry, grace=30):
-    """Never signal a recycled PID; verify start time AND VM disk in QEMU argv."""
-    owned = []
-    records = []
-    for intent in registry.glob("*.intent"):
-        pidfile, earliest, directory = intent.read_text().splitlines()
+    """Use captured exact executable/root identity, never adopt a live process's exe."""
+    from tests.qemu_owner import private_text
+    registry = Path(registry)
+    try:
+        identity(registry)
+        record_paths = list(registry.glob("*.record"))
+        intent_paths = list(registry.glob("*.intent"))
+    except (OwnerError, OSError, ValueError, KeyError, TypeError, OverflowError) as error:
+        raise CommandFailure(f"VM ownership cleanup incomplete: {error}") from error
+    records = {}
+    entry_errors = {}
+    for record in record_paths:
         try:
-            value = Path(pidfile).read_text().strip()
-        except FileNotFoundError:
-            # QEMU normally removes its pidfile on graceful exit.
-            continue
-        if not value:
-            continue
-        pid = int(value)
-        started = process_identity(pid)
-        if started is not None and int(started) >= int(earliest):
-            records.append((value, started, directory))
-    for record in registry.glob("*.record"):
-        try:
-            fields = record.read_text().splitlines()
-        except FileNotFoundError:
-            continue
-        if len(fields) == 3 and all(fields) and fields[0].isdigit() and fields[1].isdigit():
-            records.append(tuple(fields))
-    for pid_text, started, directory in set(records):
-        pid = int(pid_text)
-        if process_identity(pid) != started:
+            records[record.stem] = validate_vm_entry(private_json(record), "running")
+        except (OwnerError, OSError, ValueError, KeyError, TypeError, OverflowError) as error:
+            entry_errors[record.stem] = error
+    for intent in intent_paths:
+        if intent.stem in records:
             continue
         try:
-            command = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
-        except (FileNotFoundError, ProcessLookupError):
-            continue
-        if not command or b"qemu-system-" not in command[0] or not any(
-            os.fsencode(str(Path(directory) / "disk.qcow2")) in arg for arg in command
-        ):
-            raise CommandFailure("VM ownership verification failed")
-        if process_identity(pid) != started:
-            continue
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            continue
-        owned.append((pid, started))
-    deadline = time.monotonic() + grace
-    while owned and time.monotonic() < deadline:
-        owned = [(pid, start) for pid, start in owned if process_identity(pid) == start]
-        if owned:
-            time.sleep(0.1)
-    for pid, start in owned:
-        if process_identity(pid) == start:
+            value = validate_vm_entry(private_json(intent), "launching")
             try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                continue
-    if owned:
-        time.sleep(0.1)
-    if any(process_identity(pid) == start for pid, start in owned):
-        raise CommandFailure("VM cleanup incomplete")
+                pid = private_text(Path(value["pidfile"]), expected_parent=value["pidfile_parent_identity"]).strip()
+            except FileNotFoundError:
+                raise OwnerError("QEMU intent has no pidfile or completed record; possible orphan") from None
+            if not pid.isdigit():
+                raise OwnerError("Malformed QEMU startup pidfile; possible orphan")
+            started = process_identity(int(pid))
+            if started is None or int(started) < int(value["earliest"]):
+                raise OwnerError("Startup QEMU identity missing; possible orphan")
+            value.update(pid=pid, started=started)
+            records[intent.stem] = value
+            entry_errors.pop(intent.stem, None)
+        except (OwnerError, OSError, ValueError, KeyError, TypeError, OverflowError) as error:
+            entry_errors[intent.stem] = error
+    errors = list(entry_errors.values())
+    for value in records.values():
+        try:
+            terminate_owned(value["pid"], value["started"], value["disk"], executable=value["executable"], grace=grace)
+        except (OwnerError, OSError, ValueError, KeyError, TypeError, OverflowError) as error:
+            errors.append(error)
+    if errors:
+        raise CommandFailure("VM ownership cleanup incomplete: " + " | ".join(str(error) for error in errors)) from errors[0]
 
 
 def group_alive(pgid):
@@ -259,8 +343,14 @@ def run(argv, *, cwd, log, timeout=900, env=None, case_id="command", heartbeat=N
     environment["PATH"] = str(Path(sys.executable).parent) + os.pathsep + environment.get("PATH", "")
     environment.update(env or {})
     process = None
+    owner = None
     started = time.monotonic()
     try:
+        if registry is not None:
+            candidate = _SCRATCH_OWNERS.get(str(Path(registry).absolute()))
+            if candidate is not None:
+                candidate.begin()
+                owner = candidate
         with log.open("wb") as output:
             os.chmod(log, 0o600)
             process = subprocess.Popen(argv, cwd=cwd, env=environment, stdin=subprocess.DEVNULL,
@@ -278,12 +368,26 @@ def run(argv, *, cwd, log, timeout=900, env=None, case_id="command", heartbeat=N
             if code != expected:
                 raise CommandFailure(f"{case_id}: exit {code}; stage: {safe_stage(log)}; private log: {log}")
             return code
-    except OSError:
-        raise CommandFailure(f"{case_id}: could not start required command; private log: {log}") from None
+    except (OSError, OwnerError):
+        raise CommandFailure(f"{case_id}: could not start required command safely; private log: {log}") from None
     finally:
-        try:
-            if process:
-                stop_group(process, grace)
-        finally:
-            if registry:
-                cleanup_vms(registry, grace)
+        primary_error = sys.exc_info()[1]
+        if owner is not None and primary_error is not None:
+            owner.retain = True
+        cleanup_errors = []
+        for cleanup in (lambda: stop_group(process, grace) if process else None,
+                        lambda: cleanup_vms(registry, grace) if registry is not None else None):
+            try:
+                cleanup()
+            except BaseException as error:
+                cleanup_errors.append(error)
+        if owner is not None:
+            try:
+                owner.finish(not cleanup_errors)
+            except BaseException as error:
+                cleanup_errors.append(error)
+        if cleanup_errors:
+            if primary_error is not None:
+                print("QA cleanup incomplete; primary command error preserved and scratch retained", file=sys.stderr)
+            else:
+                raise cleanup_errors[0]

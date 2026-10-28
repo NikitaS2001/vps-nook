@@ -21,6 +21,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Install native test prerequisites
+        run: sudo apt-get update && sudo apt-get install -y strace
+
       - name: Bootstrap development tools
         run: scripts/bootstrap.sh
 
@@ -57,6 +60,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Install native test prerequisites
+        run: sudo apt-get update && sudo apt-get install -y strace
+
       - name: Bootstrap development tools
         run: scripts/bootstrap.sh
 
@@ -71,7 +77,7 @@ jobs:
           QEMU_IMAGE: ${{ matrix.image }}
           QEMU_USER: ${{ matrix.user }}
           NOOK_WG_TRAFFIC_MODE: services
-        run: .venv/bin/pytest -m qemu --junitxml=reports/qemu.xml
+        run: .venv/bin/pytest -m qemu -k qemu-services --junitxml=reports/qemu.xml
 
       - name: Upload test summary
         if: always()
@@ -79,5 +85,77 @@ jobs:
         with:
           name: ci-qemu-${{ matrix.os }}-junit
           path: reports/qemu.xml
+          if-no-files-found: error
+          retention-days: 7
+
+  extensions:
+    needs: static
+    runs-on: ubuntu-24.04
+    timeout-minutes: 80
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            image: https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
+            user: ubuntu
+          - os: debian-12
+            image: https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2
+            user: debian
+    name: extension / ${{ matrix.os }} / vaultwarden
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install test prerequisites
+        run: sudo apt-get update && sudo apt-get install -y strace genisoimage qemu-system-x86 qemu-utils
+      - name: Bootstrap development tools
+        run: scripts/bootstrap.sh
+      - name: Enable KVM access
+        run: sudo chmod a+rw /dev/kvm
+      - name: Run extension E2E
+        env:
+          QEMU_IMAGE: ${{ matrix.image }}
+          QEMU_USER: ${{ matrix.user }}
+        run: .venv/bin/pytest -m extension --junitxml=reports/extension.xml
+      - name: Upload extension summary
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-extension-${{ matrix.os }}-junit
+          path: reports/extension.xml
+          if-no-files-found: error
+          retention-days: 7
+
+  fresh-vpn:
+    needs: static
+    runs-on: ubuntu-24.04
+    timeout-minutes: 80
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [debian, ubuntu]
+        backend: [wg, awg]
+        policy: [services, full]
+    name: fresh / ${{ matrix.os }} / ${{ matrix.backend }} / ${{ matrix.policy }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install test prerequisites
+        run: sudo apt-get update && sudo apt-get install -y strace genisoimage qemu-system-x86 qemu-utils
+      - name: Bootstrap development tools
+        run: scripts/bootstrap.sh
+      - name: Enable KVM access
+        run: sudo chmod a+rw /dev/kvm
+      - name: Run registered fresh VPN case
+        run: >-
+          .venv/bin/pytest -m qemu
+          -k "fresh-${{ matrix.os }}-${{ matrix.backend }}-${{ matrix.policy }}"
+          --junitxml=reports/fresh.xml
+      - name: Upload test summary
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fresh-${{ matrix.os }}-${{ matrix.backend }}-${{ matrix.policy }}-junit
+          path: reports/fresh.xml
           if-no-files-found: error
           retention-days: 7

@@ -63,25 +63,12 @@ install -d -m 0700 "${ARTIFACT_DIR}"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ztvps-lifecycle.XXXXXX")"
 STATE_SENTINEL="${TMP_DIR}/.lifecycle-state"
 printf 'ztvps-lifecycle-v1\n' >"${STATE_SENTINEL}"
-QEMU_PID=''
+init_owned_qemu "${TMP_DIR}"
 cleanup() {
     local rc=$? cleanup_ok=true
     trap - EXIT
-    if [[ -n ${QEMU_PID} ]] && kill -0 "${QEMU_PID}" >/dev/null 2>&1; then
-        kill "${QEMU_PID}" >/dev/null 2>&1 || true
-        for _ in {1..10}; do
-            kill -0 "${QEMU_PID}" >/dev/null 2>&1 || break
-            sleep 1
-        done
-        if kill -0 "${QEMU_PID}" >/dev/null 2>&1; then
-            kill -9 "${QEMU_PID}" >/dev/null 2>&1 || true
-            cleanup_ok=false
-        fi
-    fi
-    if [[ ! -f ${STATE_SENTINEL} || $(<"${STATE_SENTINEL}") != ztvps-lifecycle-v1 ]]; then
-        echo '[CLEANUP] refusing to remove unrecognized lifecycle state' >&2
-        cleanup_ok=false
-    elif ! rm -rf -- "${TMP_DIR}" || [[ -e ${TMP_DIR} ]]; then
+    if ! cleanup_owned_qemu "${TMP_DIR}" --sentinel "${STATE_SENTINEL}" ztvps-lifecycle-v1; then
+        echo '[CLEANUP] lifecycle state retained: ownership/exit not confirmed' >&2
         cleanup_ok=false
     fi
     if [[ ${cleanup_ok} == true ]]; then

@@ -54,7 +54,7 @@ if [[ "${MODE}" != run && -z "${STATE_DIR}" ]]; then
     fail "${MODE} mode requires --state-dir"
 fi
 
-VPS_HOST="${VPS_HOST:-89.124.117.175}"
+[[ -n "${VPS_HOST:-}" ]] || fail 'VPS_HOST is required; refusing an implicit remote target'
 VPS_SSH_PORT="${VPS_SSH_PORT:-2222}"
 VPS_SSH_USER="${VPS_SSH_USER:-sysadmin}"
 VPS_SSH_KEY="${VPS_SSH_KEY:-${HOME}/.ssh/id_ed25519}"
@@ -77,6 +77,11 @@ CLIENT_IPV6="fd42:42:42::5"
 [[ "${QEMU_SSH_PORT}" =~ ^[1-9][0-9]{0,4}$ && "${QEMU_SSH_PORT}" -le 65535 ]] || fail "QEMU_SSH_PORT is invalid"
 [[ "${F3_LITERAL_DNS}" =~ ^[01]$ ]] || fail "F3_LITERAL_DNS must be 0 or 1"
 
+if [[ "${MODE}" == cleanup ]]; then
+    qemu_owner_cli check-path "${STATE_DIR}"
+    qemu_owner_cli peer-target "${STATE_DIR}" --host "${VPS_HOST}" --port "${VPS_SSH_PORT}" --user "${VPS_SSH_USER}"
+fi
+
 for tool in qemu-system-x86_64 qemu-img genisoimage curl ssh-keygen openssl ssh tar; do
     command -v "${tool}" >/dev/null || fail "required tool not found: ${tool}"
 done
@@ -87,6 +92,7 @@ SSH_CMD=(ssh -F none -i "${VPS_SSH_KEY}" -p "${VPS_SSH_PORT}"
     -o GlobalKnownHostsFile=/dev/null "${VPS_SSH_USER}@${VPS_HOST}")
 
 if [[ -n "${STATE_DIR}" ]]; then
+    qemu_owner_cli check-path "${STATE_DIR}"
     if [[ "${MODE}" == cleanup ]]; then
         [[ -d "${STATE_DIR}" ]] || fail "cleanup state directory does not exist"
     else
@@ -100,20 +106,27 @@ if [[ -n "${STATE_DIR}" ]]; then
 else
     TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ztvps-extclient.XXXXXX")"
 fi
-QEMU_PID=""
 CLIENT_PUB=""
 STATE_SENTINEL="${TMP_DIR}/.external-client-state"
 if [[ "${MODE}" != cleanup ]]; then
     printf 'external-client-qemu-v1\n' >"${STATE_SENTINEL}"
 fi
+if [[ "${MODE}" == cleanup ]]; then
+    init_owned_qemu "${TMP_DIR}" --existing
+else
+    init_owned_qemu "${TMP_DIR}"
+fi
 cleanup() {
     local remove_state="${1:-yes}"
     local cleanup_ok=true
+    if [[ -e "${TMP_DIR}/peer.env" || -L "${TMP_DIR}/peer.env" ]]; then
+        if ! qemu_owner_cli peer-target "${TMP_DIR}" --host "${VPS_HOST}" --port "${VPS_SSH_PORT}" --user "${VPS_SSH_USER}"; then
+            echo '[CLEANUP] Target mismatch/unsafe peer state; no remote cleanup, state retained' >&2
+            return 1
+        fi
+    fi
     if [[ -z "${CLIENT_PUB}" && -f "${TMP_DIR}/peer.env" ]]; then
         CLIENT_PUB="$(sed -n 's/^PEER_PUBLIC_KEY=//p' "${TMP_DIR}/peer.env")"
-    fi
-    if [[ -z "${QEMU_PID}" && -s "${TMP_DIR}/qemu.pid" ]]; then
-        QEMU_PID="$(<"${TMP_DIR}/qemu.pid")"
     fi
     if [[ -f "${TMP_DIR}/f3-dns-injected" ]]; then
         if ! "${SSH_CMD[@]}" "sudo sed -i 's/answer: 10.8.0.1/answer: 10.66.0.3/' /opt/vps-nook/volumes/adguard/conf/AdGuardHome.yaml && sudo docker restart adguard >/dev/null"; then
@@ -183,15 +196,11 @@ VERIFY_DATABASE
         >/dev/null 2>&1; then
         cleanup_ok=false
     fi
-    if [[ -n "${QEMU_PID}" ]] && kill -0 "${QEMU_PID}" >/dev/null 2>&1; then
-        kill "${QEMU_PID}" >/dev/null 2>&1 || true
-        sleep 2
+    local owner_args=("${TMP_DIR}" --sentinel "${STATE_SENTINEL}" external-client-qemu-v1)
+    if [[ "${remove_state}" != yes || "${cleanup_ok}" != true ]]; then
+        owner_args+=(--keep-state)
     fi
-    if [[ "${remove_state}" == yes ]]; then
-        [[ -f "${STATE_SENTINEL}" && "$(<"${STATE_SENTINEL}")" == external-client-qemu-v1 ]] || \
-            fail "refusing to remove an unrecognized state directory"
-        rm -rf -- "${TMP_DIR}"
-    fi
+    cleanup_owned_qemu "${owner_args[@]}" || cleanup_ok=false
     [[ "${cleanup_ok}" == true ]] || return 1
 }
 trap cleanup EXIT

@@ -14,6 +14,9 @@ upstream artifacts are in [`defaults/main.yml`](defaults/main.yml).
 | --- | --- | --- |
 | `project_root` | `/opt/vps-nook` | Managed Compose, Caddy, and service-data root |
 | `wg_traffic_mode` | `services` | Server-enforced `services` or IPv4 `full` policy with optional IPv6 |
+| `wg_amnezia_enabled` | `false` | Select AmneziaWG independently of traffic mode. The role automatically prepares the matching host module. A matching client is required. |
+| `wg_amnezia_kernel_module` | `amneziawg` | Fixed supported kernel module identity |
+| `wg_amnezia_overrided_executable` | `awg` | Fixed supported container tool identity |
 | `docker_network_subnet` | `10.66.0.0/24` | Private service IPv4 network |
 | `docker_network_ipv6_subnet` | `fd00:67:0:0::/64` | Private service IPv6 network |
 | `wg_vpn_subnet` | `10.8.0.0/24` | WireGuard client IPv4 network |
@@ -40,6 +43,59 @@ See [traffic policy](../../docs/configuration.md#traffic-policy) for mode behavi
 and client requirements. Transitions snapshot wg-easy state, apply policy while
 it is stopped, and restore the snapshot if activation or readiness fails.
 
+## VPN backend
+
+The installer maps `NOOK_VPN_BACKEND=wg|awg` (default `wg`) to the role boolean
+`wg_amnezia_enabled` (default `false`). Either backend supports `services` or `full`.
+Selecting AWG does not change the routing default.
+
+The shared orchestration role automatically prepares the host's AWG kernel module.
+The role uses pinned upstream source, authenticated distro DKMS/build packages,
+and headers for the exact running kernel. The installer only checks feasibility
+before fresh encrypted-state commitment. A matching AmneziaWG client is required.
+
+Supported platforms and resource requirements:
+
+- Debian 12 with a 6.1 `amd64` or `cloud-amd64` kernel.
+- Ubuntu 24.04 with a GA 6.8 `generic` kernel.
+- amd64 architecture and at least 900 MiB of OS-visible RAM.
+- At least 2 GiB of free build space before dependency installation.
+- At least 256 MiB of free build space remaining for compilation.
+- An available `/dev/net/tun` device.
+
+The role refuses other kernel flavours. It also refuses these host conditions:
+
+- Enabled or unknown Secure Boot, module signature enforcement, or lockdown.
+- Enabled unattended automatic reboot.
+- Active swap or any zram devices.
+
+Builds use one CPU, a 512 MiB memory limit, no build swap, and a 20-minute timeout.
+The role uses no PPA, userspace fallback, kernel replacement, or automatic reboot.
+
+The shared preflight runs before fresh encrypted-state commitment.
+Dependency, build or load failures after commitment preserve authoritative
+vault/backend inputs for rerun. The role preserves and refuses unknown
+module/DKMS state. WG does not install or download AWG dependencies.
+Module preparation precedes Docker. The role verifies version/vermagic and
+loaded identity before AWG bootstrap.
+
+New installer vaults store canonical `"false"`/`"true"` backend values.
+The installer passes the backend value to Ansible as a native boolean.
+Legacy vaults without the field remain WG.
+Installer reruns preserve saved vault/password bytes:
+
+- Omitting `NOOK_VPN_BACKEND` preserves the saved backend.
+- Matching explicit input is accepted.
+- Conflicting input is rejected.
+
+Controller variables remain separate from installer state.
+
+Backend changes are not a supported controller transition procedure for existing peers.
+There is no silent migration. Changed protocol or routing requires refreshed
+client profiles. AWG requires the matching application. See
+[Configuration](../../docs/configuration.md#amneziawg) and
+[module operations](../../docs/operations.md#amneziawg-kernel-module).
+
 ## Owned state and extension points
 
 - The role owns `docker-compose.yml`, the managed `Caddyfile`, its activation
@@ -54,6 +110,11 @@ it is stopped, and restore the snapshot if activation or readiness fails.
 - The exact IPv4/IPv6 netfilter modules used by wg-easy are loaded and
   persisted on the host. A kernel that does not provide them is rejected;
   wg-easy keeps only the `NET_ADMIN` capability.
+- With `wg_amnezia_enabled`, the role automatically prepares the pinned
+  `amneziawg` source using bounded host DKMS. The role verifies and persists the
+  module, then tells wg-easy to select it explicitly. Live interface checks use `awg`.
+  Unsupported kernels fail closed. The role uses no userspace fallback or
+  host `/lib/modules` bind mount.
 - The fetched internal root CA is written to the configured controller
   destination.
 

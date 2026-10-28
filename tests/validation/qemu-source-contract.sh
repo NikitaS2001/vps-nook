@@ -51,7 +51,7 @@ printf 'changed after snapshot\n' >"${TMP_DIR}/kept"
 # shellcheck disable=SC2016
 grep -Fq 'tar -C "${SOURCE_DIR}" -czf - .' "${ROOT_DIR}/tests/e2e/qemu-install.sh"
 # shellcheck disable=SC2016
-grep -Fq '< "${SOURCE_DIR}/tests/e2e/client-in-guest.sh"' "${ROOT_DIR}/tests/e2e/qemu-install.sh"
+grep -Fq 'cat "${SOURCE_DIR}/tests/e2e/client-in-guest.sh"' "${ROOT_DIR}/tests/e2e/qemu-install.sh"
 
 fresh_env="$("${ROOT_DIR}/tests/e2e/qemu-install.sh" --self-test-installer-env fresh)"
 for credential in \
@@ -61,6 +61,33 @@ for credential in \
     NOOK_SSH_PUBKEY; do
     [[ ${fresh_env} == *"${credential}="* ]] \
         || { printf 'qemu-source-contract: fresh install omitted %s\n' "${credential}" >&2; exit 1; }
+done
+
+# Wrong backend and missing exact interface must propagate, even when generic
+# `wg show` would succeed with no interfaces.
+for backend in wg awg; do
+    (
+        source "${ROOT_DIR}/tests/e2e/common.sh"
+        run_remote() {
+            case "$4" in
+                'echo ssh-ok') ;;
+                'sudo ufw status verbose') echo 'Status: active' ;;
+                'sudo ufw status') printf '2222/tcp\n51820/udp\n' ;;
+                *'docker inspect --format'*) printf '/wg-easy running none\n/adguard running healthy\n/caddy running healthy\n' ;;
+                "sudo docker exec wg-easy ${backend} show wg0") return 43 ;;
+                *'docker exec wg-easy'*) return 0 ;;
+                *'51821/api/session'*) echo 401 ;;
+                *'3000/control/status'*) echo 200 ;;
+                *'docker ps'*) ;;
+                *INIT_PASSWORD*) echo CLEAN ;;
+                *) return 44 ;;
+            esac
+        }
+        NOOK_VPN_BACKEND="${backend}" verify_deployment fixture 22 fixture
+    ) >"${TMP_DIR}/backend-check" 2>&1 && {
+        echo 'qemu-source-contract: missing selected wg0 accepted' >&2
+        exit 1
+    }
 done
 bash -c "env ${fresh_env} sh -c '\
     test \"\$NOOK_ADMIN_PASSWORD\" = \"admin'\''secret\" && \
@@ -75,6 +102,122 @@ existing_env="$("${ROOT_DIR}/tests/e2e/qemu-install.sh" --self-test-installer-en
     printf 'qemu-source-contract: existing-state rerun exposed credential inputs\n' >&2
     exit 1
 }
+
+# Execute the real installer command builder without SSH or provisioning.
+bash -se -- "${ROOT_DIR}" "${TMP_DIR}" <<'DISPATCH_CASES'
+set -euo pipefail
+ROOT_DIR="$1" TMP_DIR="$2"
+for backend in wg awg; do
+    (
+        source "${ROOT_DIR}/tests/e2e/common.sh"
+        source <(awk '/^build_installer_credential_env\(\)/,/^}/; /^run_repository_installer\(\)/,/^}/; /^run_guest_client\(\)/,/^}/' \
+            "${ROOT_DIR}/tests/e2e/qemu-install.sh")
+        run_remote() { printf '%s\n' "$4" >"${TMP_DIR}/dispatch"; echo 'NON-PRODUCTION DEVELOPMENT MODE'; }
+        export ADMIN_PASS=fixture ADGUARD_PASS=fixture WG_PASS=fixture PUBKEY=fixture
+        export E2E_SOURCE_MODE=development INSTALL_REF=fixture E2E_SSH_PORT=2222 E2E_WG_PORT=51820
+        export WG_TRAFFIC_MODE=services INTERNAL_DOMAIN_SUFFIX=internal
+        NOOK_VPN_BACKEND="${backend}" run_repository_installer fixture 22 fixture fresh >/dev/null
+        run_remote_stdin() { cat >"${TMP_DIR}/client-input"; printf '%s\n' "$4" >"${TMP_DIR}/client-dispatch"; }
+        SOURCE_DIR="${ROOT_DIR}" CLIENT_GUEST_STATE=/var/lib/private-client
+        CLIENT_EXTENSION_READY=false QEMU_ADMIN_PORT=2222
+        NOOK_VPN_BACKEND="${backend}" run_guest_client check
+    )
+    python3 - "${TMP_DIR}/dispatch" "${backend}" <<'PY'
+from pathlib import Path
+import shlex
+import sys
+
+words = shlex.split(Path(sys.argv[1]).read_text())
+fields = dict(word.split("=", 1) for word in words if "=" in word)
+assert fields.get("NOOK_VPN_BACKEND") == sys.argv[2], "installer backend forwarding"
+assert Path(sys.argv[1]).with_name("client-dispatch").read_text().strip() == "sudo bash -s"
+client_words = shlex.split(Path(sys.argv[1]).with_name("client-input").read_text().splitlines()[2])
+client_fields = dict(word.split("=", 1) for word in client_words if "=" in word)
+assert client_fields["NOOK_VPN_BACKEND"] == sys.argv[2]
+assert client_fields["CLIENT_ACTION"] == "check"
+assert client_fields["CLIENT_STATE"] == "/var/lib/private-client"
+PY
+done
+
+python3 - "${ROOT_DIR}" "${TMP_DIR}" <<'PYLIFECYCLE'
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+root, private = map(Path, sys.argv[1:])
+source = (root / "tests/e2e/qemu-install.sh").read_text()
+prepare_start = source.index('if [[ "${DO_CLIENT_TEST}" == true ]]; then')
+prepare = source[prepare_start:source.index("\nfi", prepare_start) + 3]
+reboot_start = source.index('if [[ "${DO_REBOOT}" == "true" ]]; then')
+rerun_start = source.index('if [[ "${DO_IDEMPOTENCY}" == "true" ]]; then')
+reboot = source[reboot_start:rerun_start]
+rerun = source[rerun_start:source.index("    caddy_managed_hash_before=", rerun_start)] + "\nfi\n"
+adapters = r'''
+set -euo pipefail
+TMP_DIR="$1"
+NOOK_VPN_BACKEND="$2" SETUP_FAILURE="$3"
+DO_CLIENT_TEST=true DO_REBOOT=true DO_IDEMPOTENCY=true DO_VAULTWARDEN=false
+QEMU_ADMIN_PORT=2222 WG_TRAFFIC_MODE=services
+phase=initial
+run_guest_client() {
+    printf 'client:%s\n' "$1" >>"${TMP_DIR}/sequence"
+    case "$1" in
+        prepare) peer=retained; checked=initial ;;
+        check) [[ "${peer:-}" == retained ]]; checked="${phase}" ;;
+        cleanup) peer=deleted ;;
+        *) exit 42 ;;
+    esac
+}
+reboot_and_await_guest() {
+    [[ "${peer:-}" == retained && "${checked:-}" == initial ]]
+    printf 'reboot\n' >>"${TMP_DIR}/sequence"
+    phase=reboot
+}
+run_repository_installer() {
+    [[ "${peer:-}" == retained && "${checked:-}" == reboot ]]
+    printf 'rerun\n' >>"${TMP_DIR}/sequence"
+    phase=rerun
+}
+run_remote() {
+    case "$4" in
+        'sudo /opt/vps-nook-installer/repo/tests/e2e/prepare-vpn-client.sh '*)
+            [[ -z "${SETUP_FAILURE}" ]] || return 42 ;;
+        *) [[ "${phase}" != initial ]] || return 43; echo same-container ;;
+    esac
+}
+verify_deployment() { :; }
+verify_traffic_mode() { :; }
+install_reload_audit() { :; }
+remote_caddy_admin_hash() { echo same-config; }
+copy_repo_to_guest() { :; }
+verify_task_skipped() { :; }
+remote_reload_count() { echo 0; }
+verify_wg_login() { :; }
+verify_bootstrap_secret_free() { :; }
+'''
+# Rerun is piped through tee in the owner; its phase is therefore observed
+# through a private event file rather than a subshell-local variable.
+adapters = adapters.replace("phase=rerun", 'printf rerun >"${TMP_DIR}/boundary"')
+adapters = adapters.replace('checked="${phase}"', 'checked="${phase}"; [[ ! -f "${TMP_DIR}/boundary" ]] || checked="$(<"${TMP_DIR}/boundary")"')
+program = "\n".join((adapters, prepare, reboot, rerun, '[[ "${peer}" == retained && "${checked}" == rerun ]]'))
+for backend, failure in (("wg", ""), ("awg", ""), ("wg", "preparation"), ("awg", "preparation")):
+    with tempfile.TemporaryDirectory(dir=private) as directory:
+        result = subprocess.run(["bash", "-c", program, "lifecycle-contract", directory, backend, failure],
+                                capture_output=True, timeout=10)
+        sequence_path = Path(directory) / "sequence"
+        sequence = sequence_path.read_text().splitlines() if sequence_path.exists() else []
+        lifecycle = ["client:prepare", "client:check", "reboot", "client:check", "client:check", "rerun", "client:check"]
+        if failure:
+            assert result.returncode == 42, (failure, result.returncode)
+            assert not sequence, "preparation failure reached peer creation"
+        else:
+            assert result.returncode == 0, "peer must precede and survive actual reboot/rerun call sites"
+            assert sequence == lifecycle, "retained peer lifecycle changed"
+        print(f"client-preparation: backend={backend} failure={failure or 'none'} exit={result.returncode}")
+print("retained-lifecycle: actual preparation/reboot/rerun ordering passed")
+PYLIFECYCLE
+DISPATCH_CASES
 vaultwarden_check="$("${ROOT_DIR}/tests/e2e/qemu-install.sh" --self-test-vaultwarden-command check)"
 [[ "${vaultwarden_check}" == "sudo /opt/vps-nook-installer/repo/examples/vaultwarden/manage.sh check --project-root /opt/vps-nook" ]] || {
     printf 'qemu-source-contract: Vaultwarden check command is not installer-managed and safely quoted\n' >&2
@@ -156,4 +299,307 @@ grep -Fq '"fd42:42:42::5/128"' \
     exit 1
 }
 
+QEMU_SOURCE_ROOT="${ROOT_DIR}" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+from tests.installer.pty_fixture import create_ux
+
+root = Path(os.environ["QEMU_SOURCE_ROOT"])
+harness = (root / "tests/e2e/qemu-install.sh").read_text()
+copy_owner = re.search(r"^copy_repo_to_guest\(\) \{\n.*?^\}", harness, re.M | re.S).group()
+caller = re.search(r'^copy_repo_to_guest "\$\{GUEST\}".*?(?=^if \[\[)', harness, re.M | re.S).group()
+
+with tempfile.TemporaryDirectory(prefix="pty-prerequisites-") as directory:
+    private = Path(directory)
+    for scenario, expected in (("install", 0), ("update-failure", 41), ("install-failure", 42),
+                               ("missing-after-install", 1), ("already-present", 0)):
+        case = private / scenario
+        binaries = case / "bin"
+        binaries.mkdir(parents=True, mode=0o700)
+        source = case / "source"
+        source.mkdir()
+        (source / "fixture").touch()
+        for name in ("bash", "cat", "awk", "git", "tar", "gzip", "python3"):
+            (binaries / name).symlink_to(shutil.which(name))
+        if scenario == "already-present":
+            (binaries / "strace").symlink_to(shutil.which("strace"))
+        sudo = binaries / "sudo"
+        sudo.write_text(f"#!{sys.executable}\nimport os, sys\nos.execvp(sys.argv[1], sys.argv[1:])\n")
+        sudo.chmod(0o700)
+        apt = binaries / "apt-get"
+        apt.write_text(f'''#!{sys.executable}
+import json, os, pathlib, sys
+with open(os.environ["PACKAGE_LOG"], "a") as stream:
+    stream.write(json.dumps(sys.argv[1:]) + "\\n")
+scenario = os.environ["SCENARIO"]
+if sys.argv[1] == "update" and scenario == "update-failure":
+    sys.exit(41)
+if sys.argv[1] == "install":
+    assert set(sys.argv[2:]) == {{"-y", "-qq", "git", "strace"}}
+    if scenario == "install-failure":
+        sys.exit(42)
+    if scenario != "missing-after-install":
+        pathlib.Path(os.environ["PATH"], "strace").symlink_to({shutil.which("strace")!r})
+''')
+        apt.chmod(0o700)
+        script = '''
+set -euo pipefail
+run_remote() {
+    case "$4" in
+        *tests.e2e.installer_sudo*)
+            command -v strace >/dev/null
+            printf 'fixture\\n' >>"${FIXTURE_LOG}"
+            ;;
+        *) bash -c "$4" ;;
+    esac
+}
+run_remote_stdin() {
+    cat >/dev/null
+    printf 'copied\\n' >>"${COPY_LOG}"
+}
+''' + copy_owner + "\n" + caller
+        environment = {**os.environ, "PATH": str(binaries), "SCENARIO": scenario,
+                       "PACKAGE_LOG": str(case / "packages"), "FIXTURE_LOG": str(case / "fixture-called"),
+                       "COPY_LOG": str(case / "copied"), "SOURCE_DIR": str(source),
+                       "TMP_DIR": str(case), "INSTALL_REF": "fixture", "GUEST": "fixture",
+                       "QEMU_SSH_PORT": "2223"}
+        result = subprocess.run([str(binaries / "bash"), "-c", script], env=environment,
+                                capture_output=True, timeout=15)
+        assert result.returncode == expected, (scenario, result.returncode)
+        assert (case / "fixture-called").exists() == (expected == 0), scenario
+        assert (case / "copied").exists() == (expected == 0), scenario
+        if scenario == "already-present":
+            assert not (case / "packages").exists()
+        if expected == 0:
+            fixture = case / "pty"
+            fixture.mkdir(mode=0o700)
+            ux = create_ux(root, fixture, case / "private-pty.log")
+            _, trace = ux.run_case("prepared PATH", ux.base + [("Install, edit, or cancel", "i\n")],
+                                   env_extra={"PATH": str(binaries)})
+            fields = ux.backend_trace(trace)
+            assert "applied" in trace and fields.backend == "wg" and fields.amnezia is False
+        print(f"pty-prerequisites: guest-setup={scenario} exit={result.returncode} fixture={expected == 0}")
+
+    for scenario, expected in (("missing-strace", 1), ("pidfd-failure", 39)):
+        case = private / scenario
+        scripts = case / "scripts"
+        scripts.mkdir(parents=True)
+        entry = scripts / "bootstrap.sh"
+        entry.write_bytes((root / "scripts/bootstrap.sh").read_bytes())
+        binaries = case / "bin"
+        binaries.mkdir(mode=0o700)
+        for name in ("bash", "dirname"):
+            (binaries / name).symlink_to(shutil.which(name))
+        if scenario == "pidfd-failure":
+            (binaries / "strace").symlink_to(shutil.which("strace"))
+        python = binaries / "python3"
+        python.write_text(f'''#!{sys.executable}
+import json, os, sys
+with open(os.environ["PYTHON_LOG"], "w") as stream:
+    json.dump(sys.argv[1:], stream)
+sys.exit(39)
+''')
+        python.chmod(0o700)
+        result = subprocess.run([str(binaries / "bash"), str(entry)],
+                                env={**os.environ, "PATH": str(binaries), "PYTHON_LOG": str(case / "python")},
+                                capture_output=True, timeout=10)
+        assert result.returncode == expected, (scenario, result.returncode)
+        assert not (case / ".venv").exists()
+        if scenario == "missing-strace":
+            assert not (case / "python").exists()
+        else:
+            assert json.loads((case / "python").read_text())[0] == "-c"
+        print(f"pty-prerequisites: bootstrap={scenario} exit={result.returncode} venv=False")
+print("pty-prerequisites: setup-cases=7 actual-PTY-cases=2 owned-state-removed")
+PY
+
 printf 'qemu-source-contract: source filter and credential-free rerun PASS\n'
+
+# The real health owner must subscribe before triggering and fail on EOF.
+bash -se -- "${ROOT_DIR}" "${TMP_DIR}" <<'HEALTH_CASES'
+    set -euo pipefail
+    ROOT_DIR="$1" TMP_DIR="$2"
+    source "${ROOT_DIR}/tests/e2e/common.sh"
+    curl() {
+        printf 'subscribed\n' >"${TMP_DIR}/subscribed"
+        printf 'HTTP/1.1 200 OK\r\n\r\n{"Type":"container","Action":"stop"}\n'
+        IFS= read -r event <"${TMP_DIR}/events"
+        printf '%s\n' "${event}"
+    }
+    docker() {
+        [[ "$1" == inspect ]] || return 2
+        printf '[{"Name":"/wg-easy","State":{"Running":true}},'
+        printf '{"Name":"/adguard","State":{"Running":true,"Health":{"Status":"%s"}}},' "${HEALTH_STATUS}"
+        printf '{"Name":"/caddy","State":{"Running":true,"Health":{"Status":"healthy"}}}]\n'
+    }
+    trigger() {
+        [[ -f "${TMP_DIR}/subscribed" ]] || return 3
+        printf '{"Action":"health_status: healthy"}\n' >"${TMP_DIR}/events"
+    }
+    mkfifo "${TMP_DIR}/events"
+    export -f trigger
+    HEALTH_STATUS=healthy await_container_health trigger
+    if (HEALTH_STATUS=unhealthy await_container_health trigger); then
+        echo 'qemu-source-contract: unhealthy EOF accepted' >&2
+        exit 1
+    fi
+HEALTH_CASES
+
+# Exercise the real cleanup owner against live processes. Substituting the
+# numeric PID after reaping deterministically models reuse without waiting for
+# the kernel to recycle a PID; the replacement is a real, unrelated child.
+QEMU_SOURCE_ROOT="${ROOT_DIR}" python3 - <<'OBSERVER_CASES'
+import os
+from pathlib import Path
+import select
+import signal
+import subprocess
+import tempfile
+
+root = Path(os.environ["QEMU_SOURCE_ROOT"])
+source = (root / "tests/e2e/qemu-install.sh").read_text()
+
+
+def function(name):
+    return name + "()" + source.split(name + "()", 1)[1].split("\n}", 1)[0] + "\n}"
+
+
+for scenario in ("active-cancel", "exited-reaped"):
+    with tempfile.TemporaryDirectory() as state:
+        unrelated = subprocess.Popen(["sleep", "60"])
+        observer_fd = None
+        owner = None
+        try:
+            script = f'source "{root}/tests/e2e/common.sh"\n'
+            script += function("cleanup") + "\n" + function("reboot_and_await_guest")
+            script += r'''
+set -euo pipefail
+SERIAL_OBSERVER_PID=""
+SERIAL_OBSERVER_CANCEL_FD=""
+BOOT_FIXTURE_ARMED=false
+CLIENT_PREPARED=false
+QEMU_PID=""
+STATE_SENTINEL="${TMP_DIR}/sentinel"
+QEMU_ADMIN_PORT=2222
+: >"${TMP_DIR}/serial.log"
+cleanup_owned_qemu() { : >"${TMP_DIR}/vm-cleaned"; }
+openssl() { printf '0123456789abcdef0123456789abcdef\n'; }
+run_remote_stdin() { cat >"${TMP_DIR}/guest-setup"; }
+run_remote() {
+    case "$4" in
+        'cat /proc/sys/kernel/random/boot_id')
+            printf 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\n'
+            ;;
+        'sudo systemctl reboot')
+            printf 'OBSERVER %s\n' "${SERIAL_OBSERVER_PID}"
+            IFS= read -r acknowledgement
+            if [[ "${SCENARIO}" == exited-reaped ]]; then
+                printf '\nNOOK_READY 0123456789abcdef0123456789abcdef bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb\n' >>"${TMP_DIR}/serial.log"
+                wait "${SERIAL_OBSERVER_PID}"
+                # Only the numeric identity changes: the owned cancellation
+                # handle must still refer to the original observer.
+                SERIAL_OBSERVER_PID="${UNRELATED_PID}"
+            fi
+            return 42
+            ;;
+        *) return 0 ;;
+    esac
+}
+trap cleanup EXIT
+reboot_and_await_guest
+'''
+            owner = subprocess.Popen(
+                ["bash", "-c", script], stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                env={**os.environ, "TMP_DIR": state, "SCENARIO": scenario,
+                     "UNRELATED_PID": str(unrelated.pid)},
+            )
+            assert select.select([owner.stdout], [], [], 10)[0], "observer never armed"
+            event = owner.stdout.readline().split()
+            assert len(event) == 2 and event[0] == "OBSERVER", event
+            observer_fd = os.pidfd_open(int(event[1]))
+            stdout, stderr = owner.communicate("continue\n", timeout=10)
+            assert owner.returncode != 0, (stdout, stderr)
+            assert (Path(state) / "vm-cleaned").exists(), stderr
+            assert select.select([observer_fd], [], [], 2)[0], "observer orphaned"
+            assert unrelated.poll() is None, "cleanup signalled an unrelated child"
+            print(f"reboot-cleanup: {scenario} observer-exited unrelated-alive")
+        finally:
+            if owner is not None and owner.poll() is None:
+                owner.kill()
+                owner.communicate()
+            if observer_fd is not None:
+                # A failed pre-fix regression can leave the active observer.
+                if not select.select([observer_fd], [], [], 0)[0]:
+                    signal.pidfd_send_signal(observer_fd, signal.SIGTERM)
+                os.close(observer_fd)
+            if unrelated.poll() is None:
+                unrelated.terminate()
+            unrelated.wait()
+OBSERVER_CASES
+
+# Drive the actual reboot owner and its real inotify observer with a private
+# serial file. Adapters replace only SSH and guest writes, never the observer.
+bash -se -- "${ROOT_DIR}" "${TMP_DIR}" <<'BOOT_CASES'
+set -euo pipefail
+ROOT_DIR="$1" BASE="$2"
+source "${ROOT_DIR}/tests/e2e/common.sh"
+source <(awk '/^reboot_and_await_guest\(\)/,/^}/' "${ROOT_DIR}/tests/e2e/qemu-install.sh")
+source <(awk '/^cleanup\(\)/,/^}/' "${ROOT_DIR}/tests/e2e/qemu-install.sh")
+for scenario in ready stale-boot wrong-ssh-boot; do
+    TMP_DIR="${BASE}/${scenario}"
+    mkdir "${TMP_DIR}"
+    : >"${TMP_DIR}/serial.log"
+    QEMU_ADMIN_PORT=2222
+    SERIAL_OBSERVER_PID="" SERIAL_OBSERVER_CANCEL_FD=""
+    BOOT_FIXTURE_ARMED=false CLIENT_PREPARED=false QEMU_PID=""
+    STATE_SENTINEL="${TMP_DIR}/sentinel"
+    cleanup_owned_qemu() { : >"${TMP_DIR}/vm-cleaned"; }
+    openssl() { printf '0123456789abcdef0123456789abcdef\n'; }
+    run_remote_stdin() { cat >"${TMP_DIR}/guest-setup"; }
+    run_remote() {
+        case "$4" in
+            'sudo systemctl reboot')
+                boot=bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb
+                [[ "${scenario}" != stale-boot ]] || boot=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+                touch "${TMP_DIR}/rebooted"
+                printf '\nNOOK_READY 0123456789abcdef0123456789abcdef %s\n' "${boot}" >>"${TMP_DIR}/serial.log"
+                ;;
+            'cat /proc/sys/kernel/random/boot_id')
+                if [[ ! -f "${TMP_DIR}/rebooted" || "${scenario}" == wrong-ssh-boot ]]; then
+                    echo aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+                else
+                    echo bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb
+                fi
+                ;;
+            *) return 0 ;;
+        esac
+    }
+    set +e
+    (set -e; trap cleanup EXIT; reboot_and_await_guest) >"${TMP_DIR}/result" 2>&1
+    status=$?
+    set -e
+    [[ -f "${TMP_DIR}/vm-cleaned" ]]
+    if [[ "${scenario}" == ready ]]; then
+        [[ "${status}" == 0 ]]
+    else
+        [[ "${status}" != 0 ]]
+    fi
+    echo "reboot-owner: ${scenario} exit=${status}"
+done
+BOOT_CASES
+
+for invalid in bogus 'awg;exit 0'; do
+    if NOOK_VPN_BACKEND="${invalid}" "${ROOT_DIR}/tests/e2e/qemu-install.sh" \
+        --self-test-installer-env fresh >"${TMP_DIR}/invalid" 2>&1; then
+        echo 'qemu-source-contract: malformed backend accepted' >&2
+        exit 1
+    fi
+done

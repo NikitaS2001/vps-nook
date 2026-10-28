@@ -16,6 +16,49 @@ pass() {
     echo "[PASS] $*"
 }
 
+vpn_executable() {
+    case "${NOOK_VPN_BACKEND:-wg}" in
+        wg) printf 'wg\n' ;;
+        awg) printf 'awg\n' ;;
+        *) fail "NOOK_VPN_BACKEND must be wg or awg" ;;
+    esac
+}
+
+# Docker flushes headers before registration, but encodes replayed events only
+# after SubscribeToEvents. A replayed container event is the subscription barrier;
+# it is not readiness evidence. This fixture has already started/stopped containers.
+await_container_health() (
+    local event_pid event_fd line
+    coproc HEALTH_EVENTS {
+        curl -fsSN --max-time 180 --include --unix-socket /var/run/docker.sock \
+            'http://localhost/events?since=0&filters=%7B%22type%22:%5B%22container%22%5D%7D'
+    }
+    event_pid="${HEALTH_EVENTS_PID}"
+    event_fd="${HEALTH_EVENTS[0]}"
+    trap 'kill "${event_pid}" 2>/dev/null || :; wait "${event_pid}" 2>/dev/null || :' EXIT
+    IFS= read -r -t 10 -u "${event_fd}" line
+    [[ "${line}" == HTTP/*' 200 '* ]] || exit 1
+    while IFS= read -r -t 10 -u "${event_fd}" line; do
+        [[ "${line}" != $'\r' ]] || break
+    done
+    [[ "${line}" == $'\r' ]] || exit 1
+    IFS= read -r -t 10 -u "${event_fd}" line || exit 1
+    jq -e '.Type == "container"' <<<"${line}" >/dev/null || exit 1
+    "$@" >/dev/null || exit
+    while true; do
+        if docker inspect wg-easy adguard caddy | jq -e '
+            length == 3 and all(.[];
+                .State.Running == true and
+                ((.Name == "/wg-easy" and (.State.Health == null or .State.Health.Status == "healthy"))
+                 or (.Name != "/wg-easy" and .State.Health.Status == "healthy")))
+        ' >/dev/null; then
+            exit 0
+        fi
+        IFS= read -r -t 180 -u "${event_fd}" line || exit 1
+        jq -e '.Type == "container" or .Action == "health_status: healthy"' <<<"${line}" >/dev/null || exit 1
+    done
+)
+
 validate_recent_matching_handshake_epochs() {
     local now="$1" client_epoch="$2" server_epoch="$3"
 
@@ -255,7 +298,8 @@ verify_deployment() {
     local target="$1"; local port="$2"; local key="$3"
     local ssh_port="${E2E_SSH_PORT:-2222}"
     local wg_port="${E2E_WG_PORT:-51820}"
-    local out
+    local out executable
+    executable="$(vpn_executable)" || return
 
     echo "[check] SSH on hardened port ${port} works with the admin key"
     run_remote "${target}" "${port}" "${key}" 'echo ssh-ok' >/dev/null
@@ -283,7 +327,9 @@ verify_deployment() {
     pass "container state and health"
 
     echo "[check] WireGuard interface is up inside wg-easy"
-    run_remote "${target}" "${port}" "${key}" 'sudo docker exec wg-easy wg show' >/dev/null
+    run_remote "${target}" "${port}" "${key}" \
+        "sudo docker exec wg-easy ${executable} show wg0" >/dev/null || \
+        fail "selected backend has no ready wg0"
     pass "WireGuard interface"
 
     echo "[check] wg-easy admin API enforces authentication (expect 401)"
@@ -339,9 +385,43 @@ verify_traffic_mode() {
         # shellcheck disable=SC2016
         run_remote "${target}" "${port}" "${key}" \
             'sudo bash -eu -o pipefail -c '\''
-                ! docker exec wg-easy iptables -C FORWARD -i wg0 -j WG_CLIENTS 2>/dev/null &&
-                ! docker exec wg-easy ip6tables -C FORWARD -i wg0 -j WG_CLIENTS 2>/dev/null
-            '\''' || fail "full unexpectedly retained services firewall hooks"
+                for family in iptables ip6tables; do
+                    rules="$(timeout 10 docker exec wg-easy "${family}" -S FORWARD)" \
+                        || exit "$?"
+                    policy=0
+                    hook=0
+                    while IFS= read -r line; do
+                        tokens=()
+                        read -r -a tokens <<<"${line}"
+                        if [[ "${tokens[0]:-}" == "-P" \
+                              && "${tokens[1]:-}" == "FORWARD" \
+                              && "${#tokens[@]}" -eq 3 ]]; then
+                            case "${tokens[2]:-}" in
+                                ACCEPT|DROP) policy=1 ;;
+                            esac
+                        fi
+                        if [[ "${tokens[0]:-}" == "-A" \
+                              && "${tokens[1]:-}" == "FORWARD" ]]; then
+                            ingress=0
+                            destination=0
+                            for ((index = 2; index + 1 < ${#tokens[@]}; index++)); do
+                                if [[ "${tokens[index]}" == "-i" \
+                                      && "${tokens[index + 1]}" == "wg0" ]]; then
+                                    ingress=1
+                                fi
+                                if [[ "${tokens[index]}" == "-j" \
+                                      && "${tokens[index + 1]}" == "WG_CLIENTS" ]]; then
+                                    destination=1
+                                fi
+                            done
+                            if [[ "${ingress}" == 1 && "${destination}" == 1 ]]; then
+                                hook=1
+                            fi
+                        fi
+                    done <<<"${rules}"
+                    [[ "${policy}" == 1 && "${hook}" == 0 ]] || exit 1
+                done
+            '\''' || fail "full firewall hooks could not be verified absent"
     fi
 }
 
@@ -352,20 +432,58 @@ verify_traffic_mode() {
 # default user-data is generated granting that key; otherwise the file is used
 # verbatim. Remaining args are hostfwd entries such as
 #   hostfwd=tcp:127.0.0.1:2223-:22
-# Sets the global QEMU_PID (used by the caller's cleanup trap) and writes the
+qemu_owner_cli() {
+    local owner_dir
+    owner_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+    python3 "${owner_dir}/../qemu_owner.py" "$@"
+}
+
+init_owned_qemu() {
+    qemu_owner_cli init "$@"
+}
+
+cleanup_owned_qemu() {
+    qemu_owner_cli cleanup "$@"
+}
+
+# Sets QEMU_PID, QEMU_START_TICKS and QEMU_PIDFILE for the caller's cleanup trap.
+# Writes the
 # serial console to <tmp_dir>/serial.log.
 boot_vm() {
     local tmp_dir="$1" image="$2" disk_gb="$3" mem_mb="$4" smp="$5"
     local instance_id="$6" hostname="$7" user_data_file="$8"
     shift 8
     local hostfwd netdev="user,id=n0"
-    local runner_pidfile="${tmp_dir}/qemu.pid"
+    local runner_pidfile="${tmp_dir}/qemu.pid" owned_identity
+    init_owned_qemu "${tmp_dir}"
 
     echo "[E2E] Preparing the cloud image..."
-    if [[ "${image}" == http* ]]; then
+    local cache_status helper_dir registry_file
+    if [[ "${image}" == https://* && -n "${QEMU_IMAGE_CACHE_DIR:-}" \
+        && -n "${QEMU_IMAGE_SHA256:-}" ]]; then
+        helper_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+        registry_file="${helper_dir}/../registry.py"
+        if python3 "${helper_dir}/qemu_image_cache.py" \
+            "${image}" "${QEMU_IMAGE_SHA256}" "${QEMU_IMAGE_CACHE_DIR}" \
+            "${registry_file}" "${tmp_dir}/cloud.img"; then
+            :
+        else
+            cache_status=$?
+            if (( cache_status != 3 )); then
+                fail "Registered stock-image cache refused or failed (status ${cache_status})"
+            fi
+            # Unregistered operator URLs are never cached; preserve the old path.
+            curl -fL --retry 3 -o "${tmp_dir}/cloud.img" "${image}"
+        fi
+    elif [[ "${image}" == http* ]]; then
         curl -fL --retry 3 -o "${tmp_dir}/cloud.img" "${image}"
     else
         cp "${image}" "${tmp_dir}/cloud.img"
+    fi
+    if [[ -n "${QEMU_IMAGE_SHA256:-}" ]]; then
+        [[ "${QEMU_IMAGE_SHA256}" =~ ^[0-9a-f]{64}$ ]] || fail "Invalid cloud image checksum"
+        printf '%s  %s\n' "${QEMU_IMAGE_SHA256}" "${tmp_dir}/cloud.img" | sha256sum --check --status \
+            || fail "Cloud image checksum mismatch; guest was not started"
     fi
     qemu-img create -f qcow2 -b "${tmp_dir}/cloud.img" -F qcow2 \
         "${tmp_dir}/disk.qcow2" "${disk_gb}G" >/dev/null
@@ -396,16 +514,13 @@ SEEDEOF
     echo "[E2E] Booting the VM (KVM)..."
     if [[ -n ${E2E_PROCESS_REGISTRY:-} ]]; then
         runner_pidfile="$(mktemp "${E2E_PROCESS_REGISTRY}/qemu.XXXXXX.pid")"
-        python3 - "${runner_pidfile}" "${tmp_dir}" <<'PYINTENT'
-import os
-from pathlib import Path
-import sys
-pidfile, directory = map(Path, sys.argv[1:])
-started = int(float(Path("/proc/uptime").read_text().split()[0]) * os.sysconf("SC_CLK_TCK"))
-intent = pidfile.with_suffix(".intent")
-intent.write_text(f"{pidfile}\n{started}\n{directory}\n")
-intent.chmod(0o600)
-PYINTENT
+    fi
+    # Capture selected pidfile/dir/exe before daemonization, including cancellation.
+    # shellcheck disable=SC2034  # exposed to direct/manual cleanup callers
+    QEMU_PIDFILE="${runner_pidfile}"
+    qemu_owner_cli prepare "${tmp_dir}" --executable "$(command -v qemu-system-x86_64)" --pidfile "${QEMU_PIDFILE}"
+    if [[ -n ${E2E_PROCESS_REGISTRY:-} ]]; then
+        qemu_owner_cli intent "${tmp_dir}" --record "${runner_pidfile%.pid}.intent"
     fi
     qemu-system-x86_64 -enable-kvm -m "${mem_mb}" -smp "${smp}" \
         -drive file="${tmp_dir}/disk.qcow2",if=virtio,format=qcow2 \
@@ -417,41 +532,13 @@ PYINTENT
     if [[ ${runner_pidfile} != "${tmp_dir}/qemu.pid" ]]; then
         cp -- "${runner_pidfile}" "${tmp_dir}/qemu.pid"
     fi
+    owned_identity="$(qemu_owner_cli publish "${tmp_dir}")" || fail "QEMU startup ownership was not captured"
+    # shellcheck disable=SC2034  # consumed by caller cleanup/diagnostics
+    read -r QEMU_PID QEMU_START_TICKS <<<"${owned_identity}"
     # Publish ownership outside VM state before any delay/cleanup can remove it.
     if [[ -n ${E2E_PROCESS_REGISTRY:-} && -s ${tmp_dir}/qemu.pid ]]; then
-        python3 - "${E2E_PROCESS_REGISTRY}" "${tmp_dir}" <<'PYREG'
-import os
-from pathlib import Path
-import sys
-import tempfile
-
-registry, directory = map(Path, sys.argv[1:])
-pid = int((directory / "qemu.pid").read_text())
-started = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
-record = registry / f"{pid}.record"
-fd, temporary = tempfile.mkstemp(prefix=f".{pid}.record.", dir=registry)
-published = False
-try:
-    os.fchmod(fd, 0o600)
-    with os.fdopen(fd, "w") as stream:
-        stream.write(f"{pid}\n{started}\n{directory}\n")
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.link(temporary, record)
-    published = True
-    os.unlink(temporary)
-    directory_fd = os.open(registry, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(directory_fd)
-    finally:
-        os.close(directory_fd)
-finally:
-    if not published:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
-PYREG
+        qemu_owner_cli record "${tmp_dir}" --record "${runner_pidfile%.pid}.record" \
+            --pid "${QEMU_PID}" --started "${QEMU_START_TICKS}"
     fi
     sleep 2
     if [[ ! -s "${tmp_dir}/qemu.pid" ]]; then
@@ -459,6 +546,5 @@ PYREG
         tail -30 "${tmp_dir}/serial.log" 2>/dev/null || true
         fail "qemu did not start"
     fi
-    # shellcheck disable=SC2034  # consumed by the caller's cleanup trap
-    QEMU_PID="$(cat "${tmp_dir}/qemu.pid")"
+    # Ownership globals were captured before any delay, not reread from a stale pidfile.
 }

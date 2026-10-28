@@ -23,12 +23,29 @@
   tags: [verify]
 
 - name: "Verify | WG | Wait for the WireGuard interface in wg-easy"
-  ansible.builtin.command: docker exec wg-easy wg show
+  ansible.builtin.command: >-
+    docker exec wg-easy {{ vps_orchestration_wg_executable }} show wg0
   register: vps_orchestration_wg_show
   changed_when: false
   retries: 18
   delay: 5
   until: vps_orchestration_wg_show.rc == 0
+  tags: [verify]
+
+- name: "Verify | AWG | Inspect kernel interface type"
+  ansible.builtin.command:
+    argv: [docker, exec, wg-easy, ip, -d, -j, link, show, dev, wg0]
+  register: vps_orchestration_awg_link
+  changed_when: false
+  when: wg_amnezia_enabled | bool
+  tags: [verify]
+
+- name: "Verify | AWG | Require the kernel AmneziaWG interface"
+  ansible.builtin.assert:
+    that:
+      - (vps_orchestration_awg_link.stdout | from_json | first).linkinfo.info_kind == 'amneziawg'
+    fail_msg: "AWG requires a kernel wg0 interface; userspace fallback is forbidden"
+  when: wg_amnezia_enabled | bool
   tags: [verify]
 
 - name: "Verify | WG | Confirm wg-easy admin API enforces authentication"

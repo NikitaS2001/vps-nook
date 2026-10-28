@@ -35,6 +35,14 @@ through a pipe. For automation use `NOOK_NONINTERACTIVE=1` and the documented
 [configuration inputs](configuration.md). Never paste real passwords into shell
 history. The wizard uses hidden input and confirms each password.
 
+On a fresh installation, the network step offers WireGuard (default) or
+AmneziaWG, then independently offers `services` (default) or `full` routing.
+Use a [supported kernel and matching AWG client](operations.md#amneziawg-kernel-module)
+before choosing AmneziaWG. The shared role installs the module automatically.
+The review displays `VPN backend`. Choose edit field **8 (VPN backend)** to
+change the fresh selection before installation. Review the selection again.
+Automation uses `NOOK_VPN_BACKEND=wg|awg` on the executing Bash process.
+
 Piping a script to Bash executes bytes trusted through HTTPS. The installer's
 signed-tag verification protects the subsequent checkout, not the script
 already executing. Use the following path for verification before execution.
@@ -73,6 +81,10 @@ installer for the same pinned release instead of resolving `latest` again. See
 [automated inputs](configuration.md#automated-installer-inputs) and
 [upgrade compatibility](../UPGRADE.md). Do not mix controller deployments with
 installer state. Malformed vaults are preserved for recovery, never replaced.
+Backend selection is immutable on installer reruns: omit `NOOK_VPN_BACKEND` to
+preserve the saved value, or supply the same value; a different value is rejected.
+Legacy saved inputs without the backend field remain WireGuard. Reruns preserve
+the saved vault and vault-password bytes, not just their logical values.
 
 ## Remote Ansible deployment
 
@@ -94,6 +106,12 @@ Edit the inventory and variables. Replace every vault placeholder, including
 `vault_wg_easy_bootstrap_secret`, and `vault_admin_ssh_pubkey`. The wg-easy
 secret must be at least 12 characters. Set `wg_public_host` and review
 `wg_traffic_mode`.
+For a fresh AWG deployment, set `wg_amnezia_enabled: true` in controller
+variables. The shared role prepares the module automatically on supported hosts.
+The `wg_amnezia_enabled` input defaults to `false`, independently of routing.
+This input is not a supported conversion procedure for an initialized WG deployment.
+For a separately confirmed disposable provider smoke test, follow the
+[AWG operations checklist](operations.md#disposable-pre-release-awg-smoke).
 
 Bootstrap the pinned controller toolchain, then encrypt both vault files before
 running the playbook:
@@ -130,6 +148,10 @@ ssh -p <ssh_port> -L 51821:127.0.0.1:51821 \
 ```
 
 Open `http://127.0.0.1:51821`, sign in, create a client, and import its profile.
+Use the client application matching the selected backend: WireGuard for `wg`,
+or AmneziaWG for `awg`. Ordinary WireGuard clients do not speak the AWG protocol.
+Refresh client profiles after routing changes; backend changes also require
+refreshed profiles and the matching application, not a silent migration.
 Connect the client before opening the internal sites. The default
 [traffic policy](configuration.md#traffic-policy) reaches managed services only.
 
