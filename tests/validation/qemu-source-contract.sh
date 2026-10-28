@@ -452,6 +452,99 @@ bash -se -- "${ROOT_DIR}" "${TMP_DIR}" <<'HEALTH_CASES'
     fi
 HEALTH_CASES
 
+# Exercise the real cleanup owner against live processes. Substituting the
+# numeric PID after reaping deterministically models reuse without waiting for
+# the kernel to recycle a PID; the replacement is a real, unrelated child.
+QEMU_SOURCE_ROOT="${ROOT_DIR}" python3 - <<'OBSERVER_CASES'
+import os
+from pathlib import Path
+import select
+import signal
+import subprocess
+import tempfile
+
+root = Path(os.environ["QEMU_SOURCE_ROOT"])
+source = (root / "tests/e2e/qemu-install.sh").read_text()
+
+
+def function(name):
+    return name + "()" + source.split(name + "()", 1)[1].split("\n}", 1)[0] + "\n}"
+
+
+for scenario in ("active-cancel", "exited-reaped"):
+    with tempfile.TemporaryDirectory() as state:
+        unrelated = subprocess.Popen(["sleep", "60"])
+        observer_fd = None
+        owner = None
+        try:
+            script = f'source "{root}/tests/e2e/common.sh"\n'
+            script += function("cleanup") + "\n" + function("reboot_and_await_guest")
+            script += r'''
+set -euo pipefail
+SERIAL_OBSERVER_PID=""
+SERIAL_OBSERVER_CANCEL_FD=""
+BOOT_FIXTURE_ARMED=false
+CLIENT_PREPARED=false
+QEMU_PID=""
+STATE_SENTINEL="${TMP_DIR}/sentinel"
+QEMU_ADMIN_PORT=2222
+: >"${TMP_DIR}/serial.log"
+cleanup_owned_qemu() { : >"${TMP_DIR}/vm-cleaned"; }
+openssl() { printf '0123456789abcdef0123456789abcdef\n'; }
+run_remote_stdin() { cat >"${TMP_DIR}/guest-setup"; }
+run_remote() {
+    case "$4" in
+        'cat /proc/sys/kernel/random/boot_id')
+            printf 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\n'
+            ;;
+        'sudo systemctl reboot')
+            printf 'OBSERVER %s\n' "${SERIAL_OBSERVER_PID}"
+            IFS= read -r acknowledgement
+            if [[ "${SCENARIO}" == exited-reaped ]]; then
+                printf '\nNOOK_READY 0123456789abcdef0123456789abcdef bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb\n' >>"${TMP_DIR}/serial.log"
+                wait "${SERIAL_OBSERVER_PID}"
+                # Only the numeric identity changes: the owned cancellation
+                # handle must still refer to the original observer.
+                SERIAL_OBSERVER_PID="${UNRELATED_PID}"
+            fi
+            return 42
+            ;;
+        *) return 0 ;;
+    esac
+}
+trap cleanup EXIT
+reboot_and_await_guest
+'''
+            owner = subprocess.Popen(
+                ["bash", "-c", script], stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                env={**os.environ, "TMP_DIR": state, "SCENARIO": scenario,
+                     "UNRELATED_PID": str(unrelated.pid)},
+            )
+            assert select.select([owner.stdout], [], [], 10)[0], "observer never armed"
+            event = owner.stdout.readline().split()
+            assert len(event) == 2 and event[0] == "OBSERVER", event
+            observer_fd = os.pidfd_open(int(event[1]))
+            stdout, stderr = owner.communicate("continue\n", timeout=10)
+            assert owner.returncode != 0, (stdout, stderr)
+            assert (Path(state) / "vm-cleaned").exists(), stderr
+            assert select.select([observer_fd], [], [], 2)[0], "observer orphaned"
+            assert unrelated.poll() is None, "cleanup signalled an unrelated child"
+            print(f"reboot-cleanup: {scenario} observer-exited unrelated-alive")
+        finally:
+            if owner is not None and owner.poll() is None:
+                owner.kill()
+                owner.communicate()
+            if observer_fd is not None:
+                # A failed pre-fix regression can leave the active observer.
+                if not select.select([observer_fd], [], [], 0)[0]:
+                    signal.pidfd_send_signal(observer_fd, signal.SIGTERM)
+                os.close(observer_fd)
+            if unrelated.poll() is None:
+                unrelated.terminate()
+            unrelated.wait()
+OBSERVER_CASES
+
 # Drive the actual reboot owner and its real inotify observer with a private
 # serial file. Adapters replace only SSH and guest writes, never the observer.
 bash -se -- "${ROOT_DIR}" "${TMP_DIR}" <<'BOOT_CASES'
@@ -459,11 +552,16 @@ set -euo pipefail
 ROOT_DIR="$1" BASE="$2"
 source "${ROOT_DIR}/tests/e2e/common.sh"
 source <(awk '/^reboot_and_await_guest\(\)/,/^}/' "${ROOT_DIR}/tests/e2e/qemu-install.sh")
+source <(awk '/^cleanup\(\)/,/^}/' "${ROOT_DIR}/tests/e2e/qemu-install.sh")
 for scenario in ready stale-boot wrong-ssh-boot; do
     TMP_DIR="${BASE}/${scenario}"
     mkdir "${TMP_DIR}"
     : >"${TMP_DIR}/serial.log"
     QEMU_ADMIN_PORT=2222
+    SERIAL_OBSERVER_PID="" SERIAL_OBSERVER_CANCEL_FD=""
+    BOOT_FIXTURE_ARMED=false CLIENT_PREPARED=false QEMU_PID=""
+    STATE_SENTINEL="${TMP_DIR}/sentinel"
+    cleanup_owned_qemu() { : >"${TMP_DIR}/vm-cleaned"; }
     openssl() { printf '0123456789abcdef0123456789abcdef\n'; }
     run_remote_stdin() { cat >"${TMP_DIR}/guest-setup"; }
     run_remote() {
@@ -481,13 +579,14 @@ for scenario in ready stale-boot wrong-ssh-boot; do
                     echo bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb
                 fi
                 ;;
-            *) return 42 ;;
+            *) return 0 ;;
         esac
     }
     set +e
-    (set -e; reboot_and_await_guest) >"${TMP_DIR}/result" 2>&1
+    (set -e; trap cleanup EXIT; reboot_and_await_guest) >"${TMP_DIR}/result" 2>&1
     status=$?
     set -e
+    [[ -f "${TMP_DIR}/vm-cleaned" ]]
     if [[ "${scenario}" == ready ]]; then
         [[ "${status}" == 0 ]]
     else

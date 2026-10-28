@@ -106,6 +106,46 @@ for scenario in retained deleted-peer changed-server changed-profile missing-id 
 done
 done
 
+# Named rt_tables entries must be treated as occupied before either family is
+# changed, including a non-default route or a rule outside our priorities.
+for occupied_family in 4 6; do
+    for occupant in route rule; do
+        (
+            PROBE_ROUTE_TABLE=51822 PROBE_RULE_PRIORITY=11000
+            PROBE_ROUTE_FAMILIES=() PROBE_ROUTE_RULES=()
+            CLIENT_IPV4=10.8.0.7 CLIENT_IPV6=fd42:42:42::7
+            ROUTING_STATE="$(mktemp -d "${TMP_DIR}/named-table.XXXXXX")"
+            printf 'foreign non-default route\n' >"${ROUTING_STATE}/route"
+            printf 'foreign priority 12345\n' >"${ROUTING_STATE}/rule"
+            printf 'unrelated main route\n' >"${ROUTING_STATE}/main"
+            cp -a "${ROUTING_STATE}" "${ROUTING_STATE}.expected"
+            ip() {
+                local family="${1#-}" numeric=false
+                shift
+                if [[ "${1:-}" == -N ]]; then numeric=true; shift; fi
+                if [[ "${1:-}" == -j ]]; then
+                    if [[ "${family}" == "${occupied_family}" && "$2" == "${occupant}" ]]; then
+                        local table=nook-probe
+                        [[ "${numeric}" != true ]] || table=51822
+                        printf '[{"table":"%s","dst":"192.0.2.0/24","priority":12345}]\n' "${table}"
+                    else
+                        printf '[]\n'
+                    fi
+                else
+                    # A mutation is observable even if the owner later cleans up.
+                    printf '%s\n' "$*" >>"${ROUTING_STATE}/mutations"
+                fi
+            }
+            result=0
+            configure_probe_routing || result=$?
+            cleanup_probe_routing
+            [[ "${result}" != 0 ]]
+            [[ "${#PROBE_ROUTE_FAMILIES[@]}" == 0 && "${#PROBE_ROUTE_RULES[@]}" == 0 ]]
+            diff -ru "${ROUTING_STATE}.expected" "${ROUTING_STATE}"
+        )
+    done
+done
+
 for backend in wg awg; do
     for scenario in fresh kernel-failure response-failure wrong-peer zero-transfer \
         route-conflict rule-conflict route-query-failure route-install-failure rule-install-failure; do
@@ -122,6 +162,7 @@ for backend in wg awg; do
             cp original.conf zt-e2e.conf
             ip() {
                 printf '%s\n' "$*" >>routes
+                [[ "${2:-}" != -N ]] || set -- "$1" "${@:3}"
                 if [[ "$1 $2" == 'link add' ]]; then
                     [[ "$4" == type && "$5" == "${VPN_LINK}" ]] || return 2
                     [[ "${scenario}" != kernel-failure ]] || return 42
@@ -218,6 +259,7 @@ for scenario in services full failed-full; do
             printf '[Peer]\nAllowedIPs = ::/0\n' >zt-e2e.conf
             ip() {
                 local entry
+                [[ "${2:-}" != -N ]] || set -- "$1" "${@:3}"
                 if [[ "$1 ${2:-} ${3:-}" == 'link delete zt-e2e' ]]; then
                     rm "${ROUTING_STATE}/zt-e2e"
                     # Kernel interface removal also removes its main-table routes.
@@ -319,6 +361,50 @@ for scenario in services full unavailable-ipv6 leaked-ipv6; do
             *) [[ "${result}" != 0 ]] ;;
         esac
     )
+done
+
+# A failed retained-peer DELETE must leave sufficient private ownership state
+# for a later cleanup action, but never retain transient session credentials.
+for action in once cleanup; do
+        CLIENT_STATE="$(mktemp -d "${TMP_DIR}/delete-retry.XXXXXX")"
+        printf 'nook-client-v1\n' >"${CLIENT_STATE}/owner"
+        printf '7\n' >"${CLIENT_STATE}/client-id"
+        touch "${CLIENT_STATE}/zt-session-cookie" "${CLIENT_STATE}/zt-session-login.json"
+        cleanup_action="${action}"
+        for delete_result in 22 0; do
+            set +e
+            (
+                set -e
+                cd "${CLIENT_STATE}"
+                PROBE_ROUTE_FAMILIES=() PROBE_ROUTE_RULES=()
+                CLIENT_ACTION="${cleanup_action}" CLIENT_ID="" API_CLIENT_ID=""
+                CONTROL_CONTAINER="" TUNNEL_CREATED=false
+                WG_USER=fixture WG_PASSWORD=fixture UI_PORT=51821
+                curl() {
+                    [[ "$*" == *"/api/client/7"* ]] || return 2
+                    [[ -f owner && "$(<owner)" == nook-client-v1 && "$(<client-id)" == 7 ]] || return 2
+                    return "${delete_result}"
+                }
+                trap cleanup EXIT
+                exit 0
+            )
+            result=$?
+            set -e
+            if [[ "${delete_result}" != 0 ]]; then
+                [[ "${result}" == 1 ]]
+            else
+                [[ "${result}" == 0 ]]
+            fi
+            if [[ "${delete_result}" != 0 ]]; then
+                [[ "$(<"${CLIENT_STATE}/owner")" == nook-client-v1 ]]
+                [[ "$(<"${CLIENT_STATE}/client-id")" == 7 ]]
+                [[ "$(stat -c %a "${CLIENT_STATE}")" == 700 ]]
+                [[ ! -e "${CLIENT_STATE}/zt-session-cookie" && ! -e "${CLIENT_STATE}/zt-session-login.json" ]]
+            else
+                [[ ! -e "${CLIENT_STATE}" ]]
+            fi
+            cleanup_action=cleanup
+        done
 done
 
 for action in prepare check cleanup; do

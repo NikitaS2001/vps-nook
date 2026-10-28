@@ -149,6 +149,8 @@ It does not make cloud-user source public.
 The client peer is created before the first completed-state rerun or reboot.
 Its ID, original private profile and identity fingerprint remain in a private
 guest directory until final cleanup.
+If peer deletion fails, cleanup preserves the ownership marker and peer ID for
+a later cleanup attempt. It still removes temporary session credentials.
 Every boundary check compares server identity, peer membership and profile parameters.
 Each check recreates only the client kernel interface and requires a bound, CA-authenticated HTTPS response.
 That fresh interface has no prior session keys.
@@ -172,6 +174,7 @@ A full profile containing `::/0` requires an actual successful public IPv6 probe
 Client probes use a dedicated routing table with source and output-interface
 rules. Host routes remain unchanged, so direct controls also work with strict
 reverse-path filtering. An occupied table or rule priority stops the probe.
+Numeric table queries also detect tables with configured iproute2 names.
 Cleanup removes only the rules and routes created by that probe.
 
 Service recovery subscribes to Docker events before starting a container.
@@ -179,6 +182,8 @@ Reboot installs an owned disposable oneshot and arms an inotify serial
 observer before the trigger; a nonce, a new boot ID, service health and
 authenticated SSH must all agree. Waits are bounded. Cleanup removes the
 observer, guest unit, test container, peer and private credential artifacts.
+The host cancels its observer by closing an owned pipe, not by signalling a
+numeric PID that Bash may already have reaped.
 The source/packet contracts execute safe adapters and the native observer;
 they do not prove guest packets, cryptographic handshakes or sudo portability.
 

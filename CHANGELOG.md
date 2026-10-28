@@ -17,6 +17,9 @@ Notable changes are recorded here. The project follows Semantic Versioning.
 - Isolate client probe routes from host routes so direct controls work with strict reverse-path filtering.
 - Stop cancelled AWG build services before releasing the module lock. Preserve a recovery barrier when termination is uncertain.
 - Preserve existing main-table IPv6 routes during public client probes, including failed probes.
+- Reject occupied probe routing tables even when iproute2 reports a configured table name.
+- Preserve retained-client ownership metadata after peer deletion fails so cleanup can retry.
+- Cancel the reboot observer through an owned pipe instead of signalling a numeric PID that Bash may already have reaped.
 - Separate core QEMU checks from the Vaultwarden extension scenario, with independent CI results and an explicit release gate.
 - Recopy private installer source as the hardened administrator before bootstrap retry after SSH cutover.
 - Preserve the active guest resolver during WG and AWG client preparation, preventing Debian package setup from removing `systemd-resolved`.

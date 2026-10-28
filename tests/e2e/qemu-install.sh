@@ -184,12 +184,17 @@ init_owned_qemu "${TMP_DIR}"
 CLIENT_PREPARED=false
 CLIENT_EXTENSION_READY=false
 SERIAL_OBSERVER_PID=""
+SERIAL_OBSERVER_CANCEL_FD=""
 BOOT_FIXTURE_ARMED=false
 cleanup() {
     local exit_status=$?
-    # The observer is an unreaped direct child (coproc exec), not a daemon PID.
+    # Closing our owned pipe cancels only this observer, even if Bash has
+    # already reaped it and its numeric PID has been reused.
+    if [[ -n "${SERIAL_OBSERVER_CANCEL_FD}" ]]; then
+        exec {SERIAL_OBSERVER_CANCEL_FD}>&-
+        SERIAL_OBSERVER_CANCEL_FD=""
+    fi
     if [[ -n "${SERIAL_OBSERVER_PID}" ]]; then
-        kill "${SERIAL_OBSERVER_PID}" 2>/dev/null || true
         wait "${SERIAL_OBSERVER_PID}" 2>/dev/null || true
         SERIAL_OBSERVER_PID=""
     fi
@@ -278,7 +283,8 @@ UNIT
     # inotify is armed and acknowledged before reboot. The guest's nonce is
     # emitted only after new-boot service health, never by a host timer.
     coproc BOOT_EVENTS {
-        exec python3 - "${TMP_DIR}/serial.log" "${nonce}" <<'PYBOOT'
+        # Preserve the coprocess control pipe separately from Python's heredoc.
+        exec python3 - "${TMP_DIR}/serial.log" "${nonce}" 3<&0 <<'PYBOOT'
 import ctypes
 import os
 import selectors
@@ -295,13 +301,19 @@ with os.fdopen(descriptor, "rb", buffering=0) as events, open(sys.argv[1], encod
     serial.seek(0, os.SEEK_END)
     with selectors.DefaultSelector() as selector:
         selector.register(events, selectors.EVENT_READ)
+        selector.register(3, selectors.EVENT_READ)
         print("ARMED", flush=True)
         deadline = time.monotonic() + 240
         pending = ""
         while True:
             remaining = deadline - time.monotonic()
-            if remaining <= 0 or not selector.select(remaining):
+            if remaining <= 0:
                 raise SystemExit("guest readiness event timeout")
+            ready = selector.select(remaining)
+            if not ready:
+                raise SystemExit("guest readiness event timeout")
+            if any(key.fd == 3 for key, _ in ready):
+                raise SystemExit("guest readiness observation cancelled")
             os.read(events.fileno(), 65536)
             pending += serial.read()
             lines = pending.split("\n")
@@ -314,6 +326,11 @@ PYBOOT
     }
     SERIAL_OBSERVER_PID="${BOOT_EVENTS_PID}"
     event_fd="${BOOT_EVENTS[0]}"
+    local observer_input_fd="${BOOT_EVENTS[1]}"
+    # Bash may close its coproc descriptors on asynchronous reap. Keep our own
+    # writer until cleanup/success, then let EOF cancel the exact reader.
+    exec {SERIAL_OBSERVER_CANCEL_FD}>&"${BOOT_EVENTS[1]}"
+    exec {observer_input_fd}>&-
     IFS= read -r -t 10 -u "${event_fd}" event
     [[ "${event}" == ARMED ]] || fail "reboot observer did not arm"
     run_remote "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
@@ -327,6 +344,8 @@ PYBOOT
     [[ "${boot}" =~ ^[0-9a-f-]{36}$ && "${boot}" != "${previous_boot}" ]] || fail "stale boot event"
     wait "${SERIAL_OBSERVER_PID}"
     SERIAL_OBSERVER_PID=""
+    exec {SERIAL_OBSERVER_CANCEL_FD}>&-
+    SERIAL_OBSERVER_CANCEL_FD=""
     [[ "$(run_remote "sysadmin@127.0.0.1" "${QEMU_ADMIN_PORT}" "${TMP_DIR}/id_ed25519" \
         'cat /proc/sys/kernel/random/boot_id')" == "${boot}" ]] || fail "SSH boot identity differs from event"
 }

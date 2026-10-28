@@ -72,8 +72,8 @@ probe_routing_rule() {
 configure_probe_routing() {
     local family rules routes selector
     for family in 4 6; do
-        rules="$(ip "-${family}" -j rule show)" || return
-        routes="$(ip "-${family}" -j route show table all)" || return
+        rules="$(ip "-${family}" -N -j rule show)" || return
+        routes="$(ip "-${family}" -N -j route show table all)" || return
         python3 - "${PROBE_ROUTE_TABLE}" "${PROBE_RULE_PRIORITY}" "${rules}" "${routes}" <<'PY' || return
 import json
 import sys
@@ -119,7 +119,7 @@ cleanup_probe_routing() {
 }
 
 cleanup() {
-    local status=$?
+    local status=$? retained_deleted=true
     trap - EXIT
     cleanup_probe_routing || status=1
     if [[ "${TUNNEL_CREATED}" == true ]]; then
@@ -139,11 +139,16 @@ cleanup() {
     if [[ "${CLIENT_ACTION}" == once || "${CLIENT_ACTION}" == cleanup ]]; then
         [[ ! -f client-id ]] || CLIENT_ID="$(<client-id)"
         if [[ -n "${CLIENT_ID}" ]]; then
-        curl -fsS -u "${WG_USER}:${WG_PASSWORD}" -X DELETE \
-            "http://127.0.0.1:${UI_PORT}/api/client/${CLIENT_ID}" >/dev/null || status=1
+            if ! curl -fsS -u "${WG_USER}:${WG_PASSWORD}" -X DELETE \
+                "http://127.0.0.1:${UI_PORT}/api/client/${CLIENT_ID}" >/dev/null; then
+                retained_deleted=false
+                status=1
+            fi
         fi
-        cd /
-        rm -rf -- "${CLIENT_STATE}"
+        if [[ "${retained_deleted}" == true ]]; then
+            cd /
+            rm -rf -- "${CLIENT_STATE}"
+        fi
     fi
     exit "${status}"
 }
